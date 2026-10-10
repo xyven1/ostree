@@ -62,7 +62,8 @@ License along with this library. If not, see <https://www.gnu.org/licenses/>.
                 <listitem><para>
                     Initialize repository in given mode
                     (<literal>bare</literal>, <literal>bare-user</literal>,
-                    <literal>bare-user-only</literal>, <literal>archive</literal>).
+                    <literal>bare-user-only</literal>, <literal>archive</literal>,
+                    <literal>archive-zstd</literal>).
                     The default is <literal>bare</literal>. Note that for
                     <literal>archive</literal> the repository configuration file
                     will actually have <literal>archive-z2</literal>, as that's
@@ -76,6 +77,9 @@ License along with this library. If not, see <https://www.gnu.org/licenses/>.
                     operations, <literal>bare-user-only</literal> does not store
                     ownership information, and <literal>archive</literal> stores
                     files compressed, to be served over the network.
+                    <literal>archive-zstd</literal> is like
+                    <literal>archive</literal> but compresses with zstd; it can
+                    only be read by versions of ostree built with zstd support.
                 </para></listitem>
             </varlistentry>
 

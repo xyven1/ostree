@@ -448,6 +448,8 @@ pub enum RepoMode {
     BareUserOnly,
     #[doc(alias = "OSTREE_REPO_MODE_BARE_SPLIT_XATTRS")]
     BareSplitXattrs,
+    #[doc(alias = "OSTREE_REPO_MODE_ARCHIVE_ZSTD")]
+    ArchiveZstd,
 #[doc(hidden)]
     __Unknown(i32),
 }
@@ -464,6 +466,7 @@ match self {
             Self::BareUser => ffi::OSTREE_REPO_MODE_BARE_USER,
             Self::BareUserOnly => ffi::OSTREE_REPO_MODE_BARE_USER_ONLY,
             Self::BareSplitXattrs => ffi::OSTREE_REPO_MODE_BARE_SPLIT_XATTRS,
+            Self::ArchiveZstd => ffi::OSTREE_REPO_MODE_ARCHIVE_ZSTD,
             Self::__Unknown(value) => value,
 }
 }
@@ -480,6 +483,7 @@ match value {
             ffi::OSTREE_REPO_MODE_BARE_USER => Self::BareUser,
             ffi::OSTREE_REPO_MODE_BARE_USER_ONLY => Self::BareUserOnly,
             ffi::OSTREE_REPO_MODE_BARE_SPLIT_XATTRS => Self::BareSplitXattrs,
+            ffi::OSTREE_REPO_MODE_ARCHIVE_ZSTD => Self::ArchiveZstd,
             value => Self::__Unknown(value),
 }
 }

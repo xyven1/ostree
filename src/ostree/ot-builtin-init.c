@@ -34,7 +34,9 @@ static char *opt_collection_id = NULL;
 
 static GOptionEntry options[]
     = { { "mode", 0, 0, G_OPTION_ARG_STRING, &opt_mode,
-          "Initialize repository in given mode (bare, bare-user, bare-user-only, archive)", NULL },
+          "Initialize repository in given mode (bare, bare-user, bare-user-only, archive, "
+          "archive-zstd)",
+          NULL },
         { "collection-id", 0, 0, G_OPTION_ARG_STRING, &opt_collection_id,
           "Globally unique ID for this repository as an collection of refs for redistribution to "
           "other repositories",

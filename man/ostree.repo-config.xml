@@ -68,7 +68,7 @@ License along with this library. If not, see <https://www.gnu.org/licenses/>.
     <variablelist>
       <varlistentry>
         <term><varname>mode</varname></term>
-        <listitem><para>One of <literal>bare</literal>, <literal>bare-user</literal>, <literal>bare-user-only</literal>, or <literal>archive-z2</literal> (note that <literal>archive</literal> is used everywhere else.)</para></listitem>
+        <listitem><para>One of <literal>bare</literal>, <literal>bare-user</literal>, <literal>bare-user-only</literal>, <literal>archive-z2</literal> (note that <literal>archive</literal> is used everywhere else), or <literal>archive-zstd</literal>.</para></listitem>
       </varlistentry>
 
       <varlistentry>
@@ -259,6 +259,36 @@ License along with this library. If not, see <https://www.gnu.org/licenses/>.
         work. If you know all clients will be 2020.7 later you can enable this to
         save network bandwidth.
         </para></listitem>
+      </varlistentry>
+    </variablelist>
+  </refsect1>
+
+  <refsect1>
+    <title>[archive] Section Options</title>
+
+    <para>
+      Options for <literal>archive</literal> and
+      <literal>archive-zstd</literal> mode repositories.  They affect
+      only objects written after the option is set; existing objects
+      are not recompressed.
+    </para>
+
+    <variablelist>
+      <varlistentry>
+        <term><varname>zlib-level</varname></term>
+        <listitem><para>Compression level for content objects in an
+        <literal>archive</literal> repository, from <literal>1</literal>
+        (fastest) to <literal>9</literal> (smallest).  Defaults to
+        <literal>6</literal>.</para></listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><varname>zstd-level</varname></term>
+        <listitem><para>Compression level for content objects in an
+        <literal>archive-zstd</literal> repository, from
+        <literal>1</literal> (fastest) to <literal>19</literal>
+        (smallest).  Defaults to <literal>3</literal>.  The level does
+        not noticeably affect how fast clients decompress.</para></listitem>
       </varlistentry>
     </variablelist>
   </refsect1>

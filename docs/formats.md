@@ -39,6 +39,27 @@ the modern `archive` format.
 When you commit new content, you will see new `.filez` files appearing
 in `objects/`.
 
+## The archive-zstd format
+
+`archive-zstd` is identical to `archive` except that content objects
+are compressed with [zstd](https://facebook.github.io/zstd/) and stored
+as `.filezst` files.  Each file is the same header used by `.filez`
+followed by one standard zstd frame, so the payload can be decoded with
+the `zstd` command line tool.  Object checksums are computed over the
+uncompressed content, so a commit has the same checksum and signatures
+in either format, and one can be converted to the other with
+`ostree pull --mirror`.
+
+zstd compresses and decompresses several times faster than zlib at a
+similar or better ratio.  The cost is compatibility: a client must be
+built with zstd support (`ostree --version` lists `zstd` under
+`Features`), and older clients refuse `archive-zstd` remotes with an
+"Invalid mode" error.  Keep an `archive` repository alongside if such
+clients must be served.
+
+The level is set with `zstd-level` in the `[archive]` section of the
+repository config (1-19, default 3).
+
 ## archive efficiency
 
 The advantages of `archive`:

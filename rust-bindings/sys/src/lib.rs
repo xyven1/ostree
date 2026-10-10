@@ -114,6 +114,7 @@ pub const OSTREE_REPO_MODE_ARCHIVE_Z2: OstreeRepoMode = 1;
 pub const OSTREE_REPO_MODE_BARE_USER: OstreeRepoMode = 2;
 pub const OSTREE_REPO_MODE_BARE_USER_ONLY: OstreeRepoMode = 3;
 pub const OSTREE_REPO_MODE_BARE_SPLIT_XATTRS: OstreeRepoMode = 4;
+pub const OSTREE_REPO_MODE_ARCHIVE_ZSTD: OstreeRepoMode = 5;
 
 pub type OstreeRepoRemoteChange = c_int;
 pub const OSTREE_REPO_REMOTE_CHANGE_ADD: OstreeRepoRemoteChange = 0;

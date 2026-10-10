@@ -714,6 +714,7 @@ const RUST_CONSTANTS: &[(&str, &str)] = &[
     ("OSTREE_REPO_METADATA_REF", "ostree-metadata"),
     ("(gint) OSTREE_REPO_MODE_ARCHIVE", "1"),
     ("(gint) OSTREE_REPO_MODE_ARCHIVE_Z2", "1"),
+    ("(gint) OSTREE_REPO_MODE_ARCHIVE_ZSTD", "5"),
     ("(gint) OSTREE_REPO_MODE_BARE", "0"),
     ("(gint) OSTREE_REPO_MODE_BARE_SPLIT_XATTRS", "4"),
     ("(gint) OSTREE_REPO_MODE_BARE_USER", "2"),
