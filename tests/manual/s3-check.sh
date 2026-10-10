@@ -8,7 +8,10 @@
 #   s3-check.sh bench <s3-url> <https-url> <ref>
 #
 # Uses the ostree found in $OSTREE, else in $PATH. Uses whatever AWS
-# credentials the environment provides; it never reads or prints them.
+# credentials the environment provides and never prints them. Note that the
+# curl debug output it captures includes the signed request headers
+# (Authorization, and X-Amz-Security-Token for temporary credentials); that
+# output stays in a private temporary directory which is removed on exit.
 
 set -euo pipefail
 

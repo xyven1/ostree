@@ -406,8 +406,10 @@ s3_get_remote (OstreeFetcher *self, GUri *baseuri, GError **error)
     return NULL;
 
   g_autoptr (GError) region_error = NULL;
-  g_autofree char *region
-      = _ostree_aws_resolve_region (loc->region, loc->profile, NULL, &region_error);
+  /* An ?endpoint= remote is not AWS, so the EC2 metadata service has
+   * nothing to say about its region and is not worth blocking on. */
+  g_autofree char *region = _ostree_aws_resolve_region (
+      loc->region, loc->profile, loc->endpoint == NULL, NULL, &region_error);
   if (region == NULL)
     {
       if (loc->endpoint == NULL)

@@ -348,7 +348,7 @@ test_resolve_region (void)
   g_autofree char *config = g_build_filename (tmpdir, "config", NULL);
 
   /* nothing configured */
-  g_autofree char *none = _ostree_aws_resolve_region (NULL, NULL, NULL, &error);
+  g_autofree char *none = _ostree_aws_resolve_region (NULL, NULL, TRUE, NULL, &error);
   g_assert_null (none);
   g_assert_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT);
   g_assert_nonnull (strstr (error->message, "?region="));
@@ -359,31 +359,31 @@ test_resolve_region (void)
                        "[default]\nregion = eu-west-1\n\n[profile gov]\nregion = us-gov-east-1\n",
                        -1, &error);
   g_assert_no_error (error);
-  g_autofree char *from_default = _ostree_aws_resolve_region (NULL, NULL, NULL, &error);
+  g_autofree char *from_default = _ostree_aws_resolve_region (NULL, NULL, TRUE, NULL, &error);
   g_assert_no_error (error);
   g_assert_cmpstr (from_default, ==, "eu-west-1");
-  g_autofree char *from_named = _ostree_aws_resolve_region (NULL, "gov", NULL, &error);
+  g_autofree char *from_named = _ostree_aws_resolve_region (NULL, "gov", TRUE, NULL, &error);
   g_assert_no_error (error);
   g_assert_cmpstr (from_named, ==, "us-gov-east-1");
   g_setenv ("AWS_PROFILE", "gov", TRUE);
-  g_autofree char *from_env_profile = _ostree_aws_resolve_region (NULL, NULL, NULL, &error);
+  g_autofree char *from_env_profile = _ostree_aws_resolve_region (NULL, NULL, TRUE, NULL, &error);
   g_assert_no_error (error);
   g_assert_cmpstr (from_env_profile, ==, "us-gov-east-1");
 
   /* AWS_DEFAULT_REGION beats the profile */
   g_setenv ("AWS_DEFAULT_REGION", "ap-south-1", TRUE);
-  g_autofree char *from_default_env = _ostree_aws_resolve_region (NULL, NULL, NULL, &error);
+  g_autofree char *from_default_env = _ostree_aws_resolve_region (NULL, NULL, TRUE, NULL, &error);
   g_assert_no_error (error);
   g_assert_cmpstr (from_default_env, ==, "ap-south-1");
 
   /* AWS_REGION beats AWS_DEFAULT_REGION */
   g_setenv ("AWS_REGION", "us-gov-west-1", TRUE);
-  g_autofree char *from_region_env = _ostree_aws_resolve_region (NULL, NULL, NULL, &error);
+  g_autofree char *from_region_env = _ostree_aws_resolve_region (NULL, NULL, TRUE, NULL, &error);
   g_assert_no_error (error);
   g_assert_cmpstr (from_region_env, ==, "us-gov-west-1");
 
   /* the URL beats everything */
-  g_autofree char *from_url = _ostree_aws_resolve_region ("us-east-2", NULL, NULL, &error);
+  g_autofree char *from_url = _ostree_aws_resolve_region ("us-east-2", NULL, TRUE, NULL, &error);
   g_assert_no_error (error);
   g_assert_cmpstr (from_url, ==, "us-east-2");
 

@@ -33,7 +33,7 @@ if ! curl --help all | grep -q -e '--aws-sigv4'; then
     skip "curl with --aws-sigv4 is required to request temporary credentials"
 fi
 
-echo '1..7'
+echo '1..9'
 
 cd ${test_tmpdir}
 
@@ -194,3 +194,22 @@ test "${parallel}" -gt "${serial}" \
 test "${parallel}" -le 48 \
     || fatal "expected at most 16 connections per fetcher at concurrency 16, got ${parallel}"
 echo "ok connection count follows the concurrency limit"
+
+# 8: no credentials anywhere fails cleanly, naming what was tried
+new_client_repo repo8 "${s3url}"
+if ${CMD_PREFIX} ostree --repo=repo8 pull origin main 2>err.txt; then
+    fatal "pulled without any credentials"
+fi
+assert_file_has_content err.txt "No AWS credentials available"
+echo "ok no credentials"
+
+# 9: an ?endpoint= remote with no region anywhere must not wait on the EC2
+# metadata service before falling back to a default signing region
+new_client_repo repo9 "s3://ostree-test/repo?endpoint=${endpoint}"
+start=$(date +%s)
+(unset AWS_EC2_METADATA_DISABLED
+ ostree_as ${root_user} ${root_secret} "" --repo=repo9 pull --disable-static-deltas origin main)
+elapsed=$(( $(date +%s) - start ))
+assert_streq "$(${CMD_PREFIX} ostree --repo=repo9 rev-parse main)" "${srv_rev}"
+test "${elapsed}" -le 5 || fatal "endpoint pull without a region took ${elapsed}s"
+echo "ok endpoint without region"

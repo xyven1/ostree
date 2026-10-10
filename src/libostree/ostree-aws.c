@@ -497,8 +497,8 @@ region_from_imds (OstreeAwsRuntime *rt)
 }
 
 char *
-_ostree_aws_resolve_region (const char *url_region, const char *profile, GCancellable *cancellable,
-                            GError **error)
+_ostree_aws_resolve_region (const char *url_region, const char *profile, gboolean allow_imds,
+                            GCancellable *cancellable, GError **error)
 {
   if (url_region != NULL)
     return g_strdup (url_region);
@@ -516,7 +516,7 @@ _ostree_aws_resolve_region (const char *url_region, const char *profile, GCancel
   if (region_is_valid (from_profile))
     return g_steal_pointer (&from_profile);
 
-  g_autofree char *from_imds = region_from_imds (rt);
+  g_autofree char *from_imds = allow_imds ? region_from_imds (rt) : NULL;
   if (region_is_valid (from_imds))
     return g_steal_pointer (&from_imds);
 

@@ -38,10 +38,11 @@ OstreeAwsCredentials *_ostree_aws_credentials_new_static (const char *access_key
                                                           const char *session_token);
 
 /* Resolve the region: @url_region, then AWS_REGION, AWS_DEFAULT_REGION, the
- * profile's region, then IMDS. @url_region and @profile may be NULL. Blocks
- * only for the IMDS fallback. */
+ * profile's region, then (if @allow_imds) IMDS. @url_region and @profile may
+ * be NULL. Blocks only for the IMDS fallback, for up to ten seconds. */
 char *_ostree_aws_resolve_region (const char *url_region, const char *profile,
-                                  GCancellable *cancellable, GError **error);
+                                  gboolean allow_imds, GCancellable *cancellable,
+                                  GError **error);
 
 /* Async. Completes on the thread-default main context of the caller.
  * @profile may be NULL. @force_refresh bypasses the process-wide cache. */
