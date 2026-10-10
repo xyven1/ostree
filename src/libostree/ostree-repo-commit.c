@@ -357,7 +357,7 @@ _ostree_repo_setup_generate_sizes (OstreeRepo *self, OstreeRepoCommitModifier *m
 {
   if (modifier && modifier->flags & OSTREE_REPO_COMMIT_MODIFIER_FLAGS_GENERATE_SIZES)
     {
-      if (ostree_repo_get_mode (self) == OSTREE_REPO_MODE_ARCHIVE)
+      if (_ostree_repo_mode_is_archive (ostree_repo_get_mode (self)))
         {
           self->generate_sizes = TRUE;
 
@@ -1032,7 +1032,7 @@ write_content_object (OstreeRepo *self, const char *expected_checksum, GInputStr
                                               &tmp_unlinker.path, cancellable, error))
         return FALSE;
     }
-  else if (repo_mode != OSTREE_REPO_MODE_ARCHIVE)
+  else if (!_ostree_repo_mode_is_archive (repo_mode))
     {
       gboolean was_reflinked = FALSE;
       if (!create_regular_tmpfile_linkable_with_content (self, size, input, file_input, &tmpf,
@@ -1054,11 +1054,11 @@ write_content_object (OstreeRepo *self, const char *expected_checksum, GInputStr
     }
   else
     {
-      g_autoptr (GConverter) zlib_compressor = NULL;
+      g_autoptr (GConverter) compressor = NULL;
       g_autoptr (GOutputStream) compressed_out_stream = NULL;
       g_autoptr (GOutputStream) temp_out = NULL;
 
-      g_assert (repo_mode == OSTREE_REPO_MODE_ARCHIVE);
+      g_assert (_ostree_repo_mode_is_archive (repo_mode));
 
       if (!glnx_open_tmpfile_linkable_at (commit_tmp_dfd (self), ".", O_WRONLY | O_CLOEXEC, &tmpf,
                                           error))
@@ -1078,14 +1078,20 @@ write_content_object (OstreeRepo *self, const char *expected_checksum, GInputStr
 
       if (g_file_info_get_file_type (file_info) == G_FILE_TYPE_REGULAR)
         {
-          zlib_compressor = (GConverter *)g_zlib_compressor_new (G_ZLIB_COMPRESSOR_FORMAT_RAW,
-                                                                 self->zlib_compression_level);
-          compressed_out_stream = g_converter_output_stream_new (temp_out, zlib_compressor);
+          const int level = (repo_mode == OSTREE_REPO_MODE_ARCHIVE_ZSTD)
+                                ? self->zstd_compression_level
+                                : self->zlib_compression_level;
+          compressor = _ostree_archive_compressor_new (repo_mode, level);
+          compressed_out_stream = g_converter_output_stream_new (temp_out, compressor);
           /* Don't close the base; we'll do that later */
           g_filter_output_stream_set_close_base_stream (
               (GFilterOutputStream *)compressed_out_stream, FALSE);
 
           if (g_output_stream_splice (compressed_out_stream, file_input, 0, cancellable, error) < 0)
+            return FALSE;
+
+          /* Writes the end of the compressed stream */
+          if (!g_output_stream_close (compressed_out_stream, cancellable, error))
             return FALSE;
 
           unpacked_size = g_file_info_get_size (file_info);
@@ -1516,6 +1522,7 @@ scan_one_loose_devino (OstreeRepo *self, int object_dir_fd, GHashTable *devino_c
           switch (self->mode)
             {
             case OSTREE_REPO_MODE_ARCHIVE:
+            case OSTREE_REPO_MODE_ARCHIVE_ZSTD:
             case OSTREE_REPO_MODE_BARE:
             case OSTREE_REPO_MODE_BARE_USER:
             case OSTREE_REPO_MODE_BARE_USER_ONLY:
@@ -1563,7 +1570,7 @@ scan_loose_devino (OstreeRepo *self, GHashTable *devino_cache, GCancellable *can
         return FALSE;
     }
 
-  if (self->mode == OSTREE_REPO_MODE_ARCHIVE && self->uncompressed_objects_dir_fd != -1)
+  if (_ostree_repo_mode_is_archive (self->mode) && self->uncompressed_objects_dir_fd != -1)
     {
       if (!scan_one_loose_devino (self, self->uncompressed_objects_dir_fd, devino_cache,
                                   cancellable, error))
@@ -2829,7 +2836,7 @@ ostree_repo_write_regfile (OstreeRepo *self, const char *expected_checksum, guin
                            guint32 gid, guint32 mode, guint64 content_len, GVariant *xattrs,
                            GError **error)
 {
-  if (self->mode == OSTREE_REPO_MODE_ARCHIVE)
+  if (_ostree_repo_mode_is_archive (self->mode))
     return glnx_null_throw (
         error, "Cannot currently use ostree_repo_write_regfile() on an archive mode repository");
 

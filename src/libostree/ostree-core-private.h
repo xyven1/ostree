@@ -66,7 +66,7 @@ G_BEGIN_DECLS
 
 /*
  * A variation on %OSTREE_FILE_HEADER_GVARIANT_FORMAT, used for
- * storing zlib-compressed content objects.
+ * storing compressed (archive and archive-zstd) content objects.
  *
  * &lt;BE guint32 containing variant length&gt;
  * t - size
@@ -77,13 +77,22 @@ G_BEGIN_DECLS
  * s - symlink target
  * a(ayay) - xattrs
  * ---
- * zlib-compressed data
+ * zlib- or zstd-compressed data
  */
 #define _OSTREE_ZLIB_FILE_HEADER_GVARIANT_FORMAT G_VARIANT_TYPE ("(tuuuusa(ayay))")
 
 GBytes *_ostree_file_header_new (GFileInfo *file_info, GVariant *xattrs);
 
 GBytes *_ostree_zlib_file_header_new (GFileInfo *file_info, GVariant *xattrs);
+
+GConverter *_ostree_archive_compressor_new (OstreeRepoMode mode, int level);
+GConverter *_ostree_archive_decompressor_new (OstreeRepoMode mode);
+
+gboolean _ostree_content_stream_parse_for_mode (OstreeRepoMode mode, GInputStream *input,
+                                                guint64 input_length, gboolean trusted,
+                                                GInputStream **out_input,
+                                                GFileInfo **out_file_info, GVariant **out_xattrs,
+                                                GCancellable *cancellable, GError **error);
 
 gboolean _ostree_make_temporary_symlink_at (int tmp_dirfd, const char *target, char **out_name,
                                             GCancellable *cancellable, GError **error);

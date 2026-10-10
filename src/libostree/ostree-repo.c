@@ -3192,6 +3192,20 @@ reload_core_config (OstreeRepo *self, GCancellable *cancellable, GError **error)
   }
 
   {
+    g_autofree char *compression_level_str = NULL;
+
+    (void)ot_keyfile_get_value_with_default (self->config, "archive", "zstd-level", NULL,
+                                             &compression_level_str, NULL);
+
+    if (compression_level_str)
+      /* Ensure level is in [1,19]; higher levels need much more memory to decompress */
+      self->zstd_compression_level
+          = MAX (1, MIN (19, g_ascii_strtoull (compression_level_str, NULL, 10)));
+    else
+      self->zstd_compression_level = OSTREE_ARCHIVE_ZSTD_DEFAULT_COMPRESSION_LEVEL;
+  }
+
+  {
     /* Parse both min-free-space-* config options. Reset the cached values first so
      * that a config reload doesn't retain stale limits from a previous load. If both
      * options are absent, fall back to min(3%, 1GB). When both are set and non-zero,
@@ -3881,6 +3895,7 @@ list_loose_objects_at (OstreeRepo *self, GVariant *dummy_value, GHashTable *inou
 
       OstreeObjectType objtype;
       if ((self->mode == OSTREE_REPO_MODE_ARCHIVE && strcmp (dot, ".filez") == 0)
+          || (self->mode == OSTREE_REPO_MODE_ARCHIVE_ZSTD && strcmp (dot, ".filezst") == 0)
           || ((_ostree_repo_mode_is_bare (self->mode)) && strcmp (dot, ".file") == 0))
         objtype = OSTREE_OBJECT_TYPE_FILE;
       else if (strcmp (dot, ".dirtree") == 0)
@@ -4111,8 +4126,9 @@ repo_load_file_archive (OstreeRepo *self, const char *checksum, GInputStream **o
 
       g_autoptr (GInputStream) tmp_stream = g_unix_input_stream_new (g_steal_fd (&fd), TRUE);
       /* Note return here */
-      return ostree_content_stream_parse (TRUE, tmp_stream, stbuf.st_size, TRUE, out_input,
-                                          out_file_info, out_xattrs, cancellable, error);
+      return _ostree_content_stream_parse_for_mode (self->mode, tmp_stream, stbuf.st_size, TRUE,
+                                                    out_input, out_file_info, out_xattrs,
+                                                    cancellable, error);
     }
   else if (self->parent_repo)
     {
@@ -4324,7 +4340,7 @@ ostree_repo_load_file (OstreeRepo *self, const char *checksum, GInputStream **ou
                        GFileInfo **out_file_info, GVariant **out_xattrs, GCancellable *cancellable,
                        GError **error)
 {
-  if (self->mode == OSTREE_REPO_MODE_ARCHIVE)
+  if (_ostree_repo_mode_is_archive (self->mode))
     return repo_load_file_archive (self, checksum, out_input, out_file_info, out_xattrs,
                                    cancellable, error);
   else

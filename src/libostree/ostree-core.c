@@ -26,6 +26,10 @@
 #include "ostree-chain-input-stream.h"
 #include "ostree-core-private.h"
 #include "ostree-varint.h"
+#ifdef HAVE_ZSTD
+#include "ostree-zstd-compressor.h"
+#include "ostree-zstd-decompressor.h"
+#endif
 #include "ostree.h"
 #include "otutil.h"
 #include <gio/gfiledescriptorbased.h>
@@ -468,6 +472,33 @@ header_and_input_to_stream (GBytes *file_header, GInputStream *input)
   return (GInputStream *)ostree_chain_input_stream_new (streams);
 }
 
+/* The compressor for content objects in archive repository mode @mode.
+ * Repositories whose mode this build can't handle are rejected when they are
+ * opened; see _ostree_repo_mode_check_supported(). */
+GConverter *
+_ostree_archive_compressor_new (OstreeRepoMode mode, int level)
+{
+  g_assert (_ostree_repo_mode_is_archive (mode));
+#ifdef HAVE_ZSTD
+  if (mode == OSTREE_REPO_MODE_ARCHIVE_ZSTD)
+    return G_CONVERTER (_ostree_zstd_compressor_new (level));
+#endif
+  g_assert (mode == OSTREE_REPO_MODE_ARCHIVE);
+  return G_CONVERTER (g_zlib_compressor_new (G_ZLIB_COMPRESSOR_FORMAT_RAW, level));
+}
+
+GConverter *
+_ostree_archive_decompressor_new (OstreeRepoMode mode)
+{
+  g_assert (_ostree_repo_mode_is_archive (mode));
+#ifdef HAVE_ZSTD
+  if (mode == OSTREE_REPO_MODE_ARCHIVE_ZSTD)
+    return G_CONVERTER (_ostree_zstd_decompressor_new ());
+#endif
+  g_assert (mode == OSTREE_REPO_MODE_ARCHIVE);
+  return G_CONVERTER (g_zlib_decompressor_new (G_ZLIB_COMPRESSOR_FORMAT_RAW));
+}
+
 /* Convert file metadata + file content into an archive-format stream. */
 gboolean
 _ostree_raw_file_to_archive_stream (GInputStream *input, GFileInfo *file_info, GVariant *xattrs,
@@ -594,6 +625,22 @@ ostree_content_stream_parse (gboolean compressed, GInputStream *input, guint64 i
                              gboolean trusted, GInputStream **out_input, GFileInfo **out_file_info,
                              GVariant **out_xattrs, GCancellable *cancellable, GError **error)
 {
+  return _ostree_content_stream_parse_for_mode (
+      compressed ? OSTREE_REPO_MODE_ARCHIVE : OSTREE_REPO_MODE_BARE, input, input_length, trusted,
+      out_input, out_file_info, out_xattrs, cancellable, error);
+}
+
+/* Like ostree_content_stream_parse(), but takes the mode of the repository
+ * the stream came from, which selects the decompressor.  Any bare mode means
+ * an uncompressed content stream. */
+gboolean
+_ostree_content_stream_parse_for_mode (OstreeRepoMode mode, GInputStream *input,
+                                       guint64 input_length, gboolean trusted,
+                                       GInputStream **out_input, GFileInfo **out_file_info,
+                                       GVariant **out_xattrs, GCancellable *cancellable,
+                                       GError **error)
+{
+  const gboolean compressed = _ostree_repo_mode_is_archive (mode);
   guint32 archive_header_size;
   guchar dummy[4];
   gsize bytes_read;
@@ -642,9 +689,8 @@ ostree_content_stream_parse (gboolean compressed, GInputStream *input, guint64 i
        **/
       if (compressed)
         {
-          g_autoptr (GConverter) zlib_decomp
-              = (GConverter *)g_zlib_decompressor_new (G_ZLIB_COMPRESSOR_FORMAT_RAW);
-          ret_input = g_converter_input_stream_new (input, zlib_decomp);
+          g_autoptr (GConverter) decomp = _ostree_archive_decompressor_new (mode);
+          ret_input = g_converter_input_stream_new (input, decomp);
         }
       else
         ret_input = g_object_ref (input);

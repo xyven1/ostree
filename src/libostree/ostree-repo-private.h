@@ -207,6 +207,7 @@ struct OstreeRepo
   gboolean per_object_fsync;
   gboolean disable_xattrs;
   guint zlib_compression_level;
+  guint zstd_compression_level;
   GHashTable *loose_object_devino_hash;
   GHashTable *updated_uncompressed_dirs;
 

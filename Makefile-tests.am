@@ -69,6 +69,7 @@ _installed_or_uninstalled_test_scripts = \
 	tests/test-cli-extensions.sh \
 	tests/test-pull-subpath.sh \
 	tests/test-archivez.sh \
+	tests/test-archive-zstd.sh \
 	tests/test-remote-add.sh \
 	tests/test-remote-headers.sh \
 	tests/test-remote-refs.sh \
@@ -449,6 +450,18 @@ tests_test_validate_utf8_SOURCES = \
 	tests/test-validate-utf8.c
 tests_test_validate_utf8_CFLAGS = $(TESTS_CFLAGS) $(libglnx_cflags)
 tests_test_validate_utf8_LDADD = $(TESTS_LDADD)
+
+# These compile ostree-core.c directly, which references the zstd converters
+if USE_ZSTD
+zstd_converter_sources = src/libostree/ostree-zstd-compressor.c \
+	src/libostree/ostree-zstd-decompressor.c
+tests_test_checksum_SOURCES += $(zstd_converter_sources)
+tests_test_checksum_CFLAGS += $(OT_DEP_ZSTD_CFLAGS)
+tests_test_checksum_LDADD += $(OT_DEP_ZSTD_LIBS)
+tests_test_validate_utf8_SOURCES += $(zstd_converter_sources)
+tests_test_validate_utf8_CFLAGS += $(OT_DEP_ZSTD_CFLAGS)
+tests_test_validate_utf8_LDADD += $(OT_DEP_ZSTD_LIBS)
+endif
 
 noinst_PROGRAMS += tests/test-commit-sign-sh-ext
 tests_test_commit_sign_sh_ext_CFLAGS = $(TESTS_CFLAGS)

@@ -859,7 +859,9 @@ ostree_file_path_to_checksum() {
 ostree_checksum_to_relative_object_path() {
     repo=$1
     checksum=$2
-    if grep -Eq -e '^mode=archive' ${repo}/config; then suffix=z; else suffix=''; fi
+    if grep -Eq -e '^mode=archive-zstd' ${repo}/config; then suffix=zst
+    elif grep -Eq -e '^mode=archive' ${repo}/config; then suffix=z
+    else suffix=''; fi
     echo objects/${checksum:0:2}/${checksum:2}.file${suffix}
 }
 

@@ -783,7 +783,7 @@ checkout_one_file_at (OstreeRepo *repo, OstreeRepoCheckoutAtOptions *options, Ch
           gboolean current_can_cache
               = (options->enable_uncompressed_cache && current_repo->enable_uncompressed_cache);
           gboolean is_archive_z2_with_cache
-              = (current_repo->mode == OSTREE_REPO_MODE_ARCHIVE
+              = (_ostree_repo_mode_is_archive (current_repo->mode)
                  && options->mode == OSTREE_REPO_CHECKOUT_MODE_USER && current_can_cache);
 
           /* NOTE: bare-user symlinks are not stored as symlinks; see
@@ -853,7 +853,7 @@ checkout_one_file_at (OstreeRepo *repo, OstreeRepoCheckoutAtOptions *options, Ch
    * it now, stick it in the cache, and then hardlink to that.
    */
   if (can_cache && !is_whiteout && !is_symlink && !(is_reg_zerosized || override_user_unreadable)
-      && need_copy && repo->mode == OSTREE_REPO_MODE_ARCHIVE
+      && need_copy && _ostree_repo_mode_is_archive (repo->mode)
       && options->mode == OSTREE_REPO_CHECKOUT_MODE_USER)
     {
       HardlinkResult hardlink_res = HARDLINK_RESULT_NOT_SUPPORTED;
