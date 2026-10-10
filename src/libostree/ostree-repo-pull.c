@@ -4520,10 +4520,24 @@ ostree_repo_pull_with_options (OstreeRepo *self, const char *remote_name_or_base
       /* The summary (if any) didn't tell us the remote's mode, which we need
        * in order to know how its content objects are named and compressed.
        * Ask its `config` file; this is usually already loaded above.  For
-       * compatibility, a remote whose config can't be fetched is assumed to be
-       * a zlib archive, which was the only possibility historically. */
+       * compatibility, a remote that has no config file is assumed to be a
+       * zlib archive, which was the only possibility historically.  Any other
+       * failure is fatal: guessing wrong would surface later as confusing
+       * 404s for content objects. */
       if (remote_config == NULL)
-        (void)load_remote_repo_config (pull_data, &remote_config, cancellable, NULL);
+        {
+          g_autoptr (GError) local_error = NULL;
+          if (!load_remote_repo_config (pull_data, &remote_config, cancellable, &local_error))
+            {
+              if (!g_error_matches (local_error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND))
+                {
+                  g_propagate_prefixed_error (error, g_steal_pointer (&local_error),
+                                              "Determining remote repository mode: ");
+                  goto out;
+                }
+              g_debug ("Remote has no config file; assuming archive mode");
+            }
+        }
 
       if (remote_config != NULL)
         {

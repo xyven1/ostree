@@ -27,10 +27,16 @@
  *
  * An implementation of #GConverter that decompresses a single zstd frame.
  *
- * The decoder keeps libzstd's default window limit
- * (ZSTD_WINDOWLOG_LIMIT_DEFAULT, 128 MiB), which bounds the memory a
- * crafted object fetched from a remote can make us allocate.
  */
+
+/* Refuse frames that need more than an 8 MiB window.  Content objects can come
+ * from an untrusted remote and several are decoded at once, so without a cap a
+ * tiny crafted frame could make each decoder allocate libzstd's default limit
+ * of 128 MiB.  8 MiB is the largest window produced by the compression levels
+ * an archive-zstd repository can be configured with (1-19).  This is part of
+ * the archive-zstd format; see docs/formats.md.
+ */
+#define OSTREE_ZSTD_DECODER_WINDOWLOG_MAX 23
 
 static void _ostree_zstd_decompressor_iface_init (GConverterIface *iface);
 
@@ -97,6 +103,14 @@ _ostree_zstd_decompressor_convert (GConverter *converter, const void *inbuf, gsi
         {
           g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED,
                                "Failed to allocate zstd decompression context");
+          return G_CONVERTER_ERROR;
+        }
+      size_t r = ZSTD_DCtx_setParameter (self->dctx, ZSTD_d_windowLogMax,
+                                         OSTREE_ZSTD_DECODER_WINDOWLOG_MAX);
+      if (ZSTD_isError (r))
+        {
+          g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED, "Failed to set zstd window limit: %s",
+                       ZSTD_getErrorName (r));
           return G_CONVERTER_ERROR;
         }
     }

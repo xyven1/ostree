@@ -84,7 +84,12 @@ for level in 1 19 0 99 abc; do
     du -sb repo-level/objects | cut -f1 > size-${level}.txt
 done
 # Level 19 must compress the compressible file at least as well as level 1
-test "$(cat size-19.txt)" -le "$(cat size-1.txt)"
+test "$(cat size-19.txt)" -lt "$(cat size-1.txt)"
+# 0 and junk are clamped up to level 1, and 99 down to level 19.  Compression
+# is deterministic, so equal levels give byte-identical repository sizes.
+assert_streq "$(cat size-0.txt)" "$(cat size-1.txt)"
+assert_streq "$(cat size-abc.txt)" "$(cat size-1.txt)"
+assert_streq "$(cat size-99.txt)" "$(cat size-19.txt)"
 echo "ok zstd-level is honoured and clamped"
 
 # A truncated object must be an error, never a short file
@@ -100,18 +105,27 @@ fi
 if ${CMD_PREFIX} ostree --repo=repo-trunc checkout -U edge co-trunc 2>err.txt; then
     assert_not_reached "checkout succeeded from a truncated .filezst"
 fi
+# Checkout does not checksum content, so this error can only have come from
+# the decompressor noticing the unfinished frame
+assert_file_has_content err.txt 'Truncated zstd stream'
 echo "ok truncated object is detected"
 
 # A corrupted payload must be an error
 rm -rf repo-corrupt
 ostree_repo_init repo-corrupt --mode=archive-zstd
 ${CMD_PREFIX} ostree --repo=repo-corrupt commit -b edge --tree=dir=edge >/dev/null
-bigobj=$(ostree_file_path_to_relative_object_path repo-corrupt edge /random)
+# Use the compressible file: incompressible data is stored as raw blocks, where
+# a flipped byte is only caught by the object checksum, not by the decoder.
+bigobj=$(ostree_file_path_to_relative_object_path repo-corrupt edge /big)
 size=$(stat -c %s repo-corrupt/${bigobj})
-printf '\xff\xff\xff\xff\xff\xff\xff\xff' | dd of=repo-corrupt/${bigobj} bs=1 seek=$((size / 2)) conv=notrunc status=none
+head -c 64 /dev/zero | tr '\0' '\377' | dd of=repo-corrupt/${bigobj} bs=1 seek=$((size / 2)) conv=notrunc status=none
 if ${CMD_PREFIX} ostree --repo=repo-corrupt fsck -q 2>err.txt; then
     assert_not_reached "fsck passed on a corrupted .filezst"
 fi
+if ${CMD_PREFIX} ostree --repo=repo-corrupt checkout -U edge co-corrupt 2>err.txt; then
+    assert_not_reached "checkout succeeded from a corrupted .filezst"
+fi
+assert_file_has_content err.txt 'zstd decompression failed'
 echo "ok corrupted object is detected"
 
 # A zlib payload under a .filezst name is rejected

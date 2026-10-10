@@ -108,9 +108,12 @@ the other is expected, and a client can tell the format from the path alone.
   client needs to decompress.
 - `[archive] zlib-level` is ignored in `archive-zstd` repositories, and
   `zstd-level` is ignored in `archive` repositories.
-- The decompressor keeps libzstd's default maximum window (128 MiB,
-  `ZSTD_WINDOWLOG_LIMIT_DEFAULT`), which bounds memory when reading data
-  from an untrusted remote. A frame demanding more is rejected as corrupt.
+- The decompressor refuses frames that need a window larger than 8 MiB
+  (`ZSTD_d_windowLogMax` = 23), the most that levels 1–19 produce. This
+  bounds memory when reading data from an untrusted remote, where several
+  objects are decoded concurrently. It is part of the format: third-party
+  writers must not use levels 20–22 or long-distance matching. (Changed
+  after code review; the first draft kept libzstd's 128 MiB default.)
 
 ## 6. Implementation
 
@@ -265,3 +268,46 @@ mirroring one into the other.
 - `docs/formats.md`: describe the `archive-zstd` object layout.
 - `ostree-core.h` and the `ostree-repo.c` class docs: describe the new enum
   value.
+
+## 11. Benchmark
+
+Measured on 2026-10-09 with the implementation on this branch, libzstd
+1.5.7, on a 32-core x86_64 machine. Data: one real OS commit (sol3
+`sysroot/version/0.3.1`, 79,299 content objects, 4.2 GB in a bare-user
+repository). "Compress" is `ostree pull-local --disable-fsync` from that
+bare-user repository into an empty repository of the given mode, which
+reads plain files and compresses them. "Checkout" is
+`ostree checkout -U --disable-cache --fsync=false`. Second of two passes;
+the passes agreed within a few percent on CPU time and exactly on size. All
+eight repositories listed identical trees.
+
+| Configuration | Repo size (bytes) | vs zlib 6 | Compress wall | Compress CPU (user + sys) | Checkout wall |
+|---|---|---|---|---|---|
+| archive, zlib 6 (existing default) | 1,171,356,104 | — | 15.7 s | 119 s + 5 s | 18.5 s |
+| archive-zstd, level 1 | 1,249,290,748 | +6.7% | 10.7 s | 23 s + 7 s | 8.0 s |
+| archive-zstd, level 3 (default) | 1,169,098,488 | −0.2% | 10.6 s | 28 s + 8 s | 8.3 s |
+| archive-zstd, level 6 | 1,111,851,108 | −5.1% | 10.0 s | 48 s + 6 s | 8.2 s |
+| archive-zstd, level 9 | 1,090,066,448 | −6.9% | 21.6 s | 199 s + 11 s | 8.2 s |
+| archive-zstd, level 12 | 1,083,175,553 | −7.5% | 175 s | 243 s + 1238 s | 8.1 s |
+| archive-zstd, level 15 | 1,078,483,481 | −7.9% | 298 s | 501 s + 2082 s | 8.1 s |
+| archive-zstd, level 19 | 967,274,219 | −17.4% | 380 s | 1472 s + 2731 s | 9.2 s |
+
+Findings:
+
+- Level 3 is the same size as zlib 6 (0.2% smaller) for about 29% of the
+  compression CPU, and checkout is about 2.2 times faster. The default of 3
+  therefore meets the "at least as small as zlib 6" bar, narrowly.
+- Level 6 is the best trade on this data: 5.1% smaller than zlib 6 while
+  still using under half its CPU and no more wall time than level 3.
+- Decompression speed is independent of level.
+- From level 12 upward most of the time is system time, not compression.
+  Each object gets a fresh compression context and, because the compressor
+  is not told the input size, libzstd sizes its tables for a large input
+  even when the file is a few hundred bytes. Allocating and zeroing those
+  tables 79,299 times dominates. Passing the known file size to the
+  compressor (`ZSTD_CCtx_setPledgedSrcSize`) should remove most of this
+  cost and improve the ratio for small files at every level; it is not
+  implemented here because it turns a size mismatch between a file's
+  metadata and its content into a hard error, which needs its own review.
+  Until then, levels above 9 are impractical for trees with many small
+  files.

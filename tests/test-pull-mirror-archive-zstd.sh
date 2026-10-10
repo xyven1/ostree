@@ -21,7 +21,7 @@ set -euo pipefail
 
 skip_without_ostree_feature zstd
 
-echo '1..5'
+echo '1..7'
 
 # Canonical permissions so that the bare-user-only pull below is lossless
 setup_fake_remote_repo1 "archive" "--canonical-permissions"
@@ -83,3 +83,29 @@ ${CMD_PREFIX} ostree --repo=client fsck -q
 ${CMD_PREFIX} ostree --repo=client checkout -U main client-co
 assert_file_has_content client-co/baz/cow '^moo$'
 echo "ok pull archive-zstd -> bare-user-only"
+
+# Without a summary, the remote's mode comes from its config file.  If that
+# can't be understood the pull must say so, rather than guess the format and
+# fail later with 404s for content objects.
+cp -a ostree-srv/zstdrepo ostree-srv/badcfgrepo
+rm -f ostree-srv/badcfgrepo/summary ostree-srv/badcfgrepo/summary.sig
+echo 'this is not a keyfile' > ostree-srv/badcfgrepo/config
+ostree_repo_init client-badcfg --mode=bare-user-only
+${CMD_PREFIX} ostree --repo=client-badcfg remote add --set=gpg-verify=false origin $(cat httpd-address)/ostree/badcfgrepo
+if ${CMD_PREFIX} ostree --repo=client-badcfg pull origin main 2>err.txt; then
+    assert_not_reached "pull succeeded with an unparsable remote config"
+fi
+assert_file_has_content err.txt 'Determining remote repository mode'
+assert_not_file_has_content err.txt '404'
+echo "ok unparsable remote config is a clear error"
+
+# Compatibility: a zlib archive remote with neither summary nor config file
+# still works, as it did before archive-zstd existed
+cp -a ostree-srv/gnomerepo ostree-srv/nocfgrepo
+rm -f ostree-srv/nocfgrepo/summary ostree-srv/nocfgrepo/summary.sig ostree-srv/nocfgrepo/config
+ostree_repo_init client-nocfg --mode=bare-user-only
+${CMD_PREFIX} ostree --repo=client-nocfg remote add --set=gpg-verify=false origin $(cat httpd-address)/ostree/nocfgrepo
+${CMD_PREFIX} ostree --repo=client-nocfg pull origin main
+${CMD_PREFIX} ostree --repo=client-nocfg fsck -q
+assert_streq "$(${CMD_PREFIX} ostree --repo=client-nocfg rev-parse main)" "${z_rev}"
+echo "ok zlib archive remote without config or summary still pulls"

@@ -60,6 +60,13 @@ clients must be served.
 The level is set with `zstd-level` in the `[archive]` section of the
 repository config (1-19, default 3).
 
+A frame must not require a window larger than 8 MiB (window log 23),
+which is the most that levels 1-19 use.  ostree refuses to decompress
+frames that need more, so that a malicious remote cannot make a client
+allocate large amounts of memory.  Tools that write `.filezst` objects
+themselves must stay within that limit: do not use levels 20-22 or
+long-distance matching.
+
 ## archive efficiency
 
 The advantages of `archive`:
