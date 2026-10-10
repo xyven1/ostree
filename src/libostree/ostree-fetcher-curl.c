@@ -53,6 +53,17 @@
 #include "ostree-repo-private.h"
 #include "otutil.h"
 
+#ifdef HAVE_AWS
+#include "ostree-aws.h"
+#include "ostree-fetcher-s3.h"
+
+/* How much of a non-2xx S3 response body to keep for error reporting. */
+#define S3_ERROR_BODY_MAX (64 * 1024)
+/* Signing region for ?endpoint= remotes that resolve none; S3-compatible
+ * servers generally accept any. */
+#define S3_ENDPOINT_FALLBACK_REGION "us-east-1"
+#endif
+
 typedef struct FetcherRequest FetcherRequest;
 typedef struct SockInfo SockInfo;
 
@@ -63,6 +74,13 @@ static int update_timeout_cb (CURLM *multi, long timeout_ms, void *userp);
 static void request_unref (FetcherRequest *req);
 static void initiate_next_curl_request (FetcherRequest *req, GTask *task);
 static void destroy_and_unref_source (GSource *source);
+
+#ifdef HAVE_AWS
+typedef struct S3Remote S3Remote;
+typedef struct S3CredState S3CredState;
+static void s3_remote_free (S3Remote *remote);
+static void s3_cred_state_free (S3CredState *cs);
+#endif
 
 struct OstreeFetcher
 {
@@ -93,6 +111,11 @@ struct OstreeFetcher
   GHashTable *sockets;              /* Set<SockInfo> */
 
   guint64 bytes_transferred;
+
+#ifdef HAVE_AWS
+  GHashTable *s3_remotes; /* base URI string -> S3Remote* */
+  GHashTable *s3_creds;   /* "profile\nregion" -> S3CredState* */
+#endif
 };
 
 /* Information associated with a request */
@@ -122,6 +145,15 @@ struct FetcherRequest
   char error[CURL_ERROR_SIZE];
 
   OstreeFetcher *fetcher;
+
+#ifdef HAVE_AWS
+  gboolean is_s3;                 /* current attempt targets an s3:// mirror */
+  gboolean s3_retried_expired;    /* already retried once after an expired-token error */
+  GString *s3_error_body;         /* body of a non-2xx response, capped */
+  char *s3_bucket_region;         /* x-amz-bucket-region response header */
+  const char *s3_creds_key;       /* owned by the S3Remote */
+  OstreeAwsCredentials *s3_creds; /* what the current attempt was signed with */
+#endif
 };
 
 /* Information associated with a specific socket */
@@ -201,6 +233,10 @@ _ostree_fetcher_finalize (GObject *object)
   g_clear_pointer (&self->extra_headers, curl_slist_free_all);
   g_hash_table_unref (self->outstanding_requests);
   g_hash_table_unref (self->sockets);
+#ifdef HAVE_AWS
+  g_hash_table_unref (self->s3_remotes);
+  g_hash_table_unref (self->s3_creds);
+#endif
   g_clear_pointer (&self->timer_event, destroy_and_unref_source);
   if (self->mainctx)
     g_main_context_unref (self->mainctx);
@@ -242,6 +278,12 @@ _ostree_fetcher_init (OstreeFetcher *self)
   self->outstanding_requests
       = g_hash_table_new_full (NULL, NULL, (GDestroyNotify)g_object_unref, NULL);
   self->sockets = g_hash_table_new_full (NULL, NULL, (GDestroyNotify)sock_unref, NULL);
+#ifdef HAVE_AWS
+  self->s3_remotes
+      = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, (GDestroyNotify)s3_remote_free);
+  self->s3_creds = g_hash_table_new_full (g_str_hash, g_str_equal, g_free,
+                                          (GDestroyNotify)s3_cred_state_free);
+#endif
   rc = curl_multi_setopt (self->multi, CURLMOPT_SOCKETFUNCTION, sock_cb);
   g_assert_cmpint (rc, ==, CURLM_OK);
   rc = curl_multi_setopt (self->multi, CURLMOPT_SOCKETDATA, self);
@@ -308,6 +350,338 @@ ensure_tmpfile (FetcherRequest *req, GError **error)
     return _ostree_fetcher_tmpf (req->fetcher->tmpdir_dfd, &req->tmpf, error);
 }
 
+#ifdef HAVE_AWS
+/* One s3:// base URI as configured on a remote. */
+struct S3Remote
+{
+  OstreeS3Location *loc;
+  char *region;    /* resolved signing region */
+  char *creds_key; /* key into OstreeFetcher.s3_creds */
+};
+
+/* Credentials for one (profile, region), shared by every request using it. */
+struct S3CredState
+{
+  OstreeAwsCredentials *creds; /* NULL until fetched, or after being dropped as expired */
+  guint64 fetched_at;          /* wall-clock seconds */
+  gboolean fetching;           /* a fetch is in flight */
+  gboolean force_next;         /* the next fetch bypasses the process-wide cache */
+  GQueue waiting;              /* GTask*, borrowed: outstanding_requests owns them */
+};
+
+static void
+s3_remote_free (S3Remote *remote)
+{
+  _ostree_s3_location_free (remote->loc);
+  g_free (remote->region);
+  g_free (remote->creds_key);
+  g_free (remote);
+}
+
+static void
+s3_cred_state_free (S3CredState *cs)
+{
+  g_clear_pointer (&cs->creds, _ostree_aws_credentials_unref);
+  g_queue_clear (&cs->waiting);
+  g_free (cs);
+}
+
+static guint64
+s3_now (void)
+{
+  return g_get_real_time () / G_USEC_PER_SEC;
+}
+
+/* Parse @baseuri and resolve its region, once per fetcher. */
+static S3Remote *
+s3_get_remote (OstreeFetcher *self, GUri *baseuri, GError **error)
+{
+  g_autofree char *key = g_uri_to_string_partial (baseuri, G_URI_HIDE_PASSWORD);
+  S3Remote *remote = g_hash_table_lookup (self->s3_remotes, key);
+  if (remote != NULL)
+    return remote;
+
+  g_autoptr (OstreeS3Location) loc = _ostree_s3_location_parse (baseuri, error);
+  if (loc == NULL)
+    return NULL;
+
+  g_autoptr (GError) region_error = NULL;
+  g_autofree char *region
+      = _ostree_aws_resolve_region (loc->region, loc->profile, NULL, &region_error);
+  if (region == NULL)
+    {
+      if (loc->endpoint == NULL)
+        {
+          g_propagate_error (error, g_steal_pointer (&region_error));
+          return NULL;
+        }
+      region = g_strdup (S3_ENDPOINT_FALLBACK_REGION);
+    }
+
+  remote = g_new0 (S3Remote, 1);
+  remote->creds_key = g_strdup_printf ("%s\n%s", loc->profile ?: "", region);
+  remote->region = g_steal_pointer (&region);
+  remote->loc = g_steal_pointer (&loc);
+  g_hash_table_insert (self->s3_remotes, g_steal_pointer (&key), remote);
+  return remote;
+}
+
+typedef struct
+{
+  GTask *task; /* owned */
+  GError *error;
+} S3FailData;
+
+static void
+s3_fail_data_free (gpointer user_data)
+{
+  S3FailData *data = user_data;
+  g_clear_error (&data->error);
+  g_object_unref (data->task);
+  g_free (data);
+}
+
+static gboolean
+s3_fail_idle_cb (gpointer user_data)
+{
+  S3FailData *data = user_data;
+  OstreeFetcher *self = g_task_get_source_object (data->task);
+
+  g_task_return_error (data->task, g_steal_pointer (&data->error));
+  /* Same bookkeeping as the end of check_multi_info(). */
+  g_hash_table_remove (self->outstanding_requests, data->task);
+  if (g_hash_table_size (self->outstanding_requests) == 0)
+    g_clear_pointer (&self->mainctx, g_main_context_unref);
+  return G_SOURCE_REMOVE;
+}
+
+/* Fail a request that never reached curl. This is deferred to an idle so
+ * it behaves the same whether we were called from
+ * _ostree_fetcher_request_async() (which adds the task to
+ * outstanding_requests only after we return) or from a callback.
+ * Takes ownership of @error. */
+static void
+s3_fail_request (OstreeFetcher *self, GTask *task, GError *error)
+{
+  S3FailData *data = g_new0 (S3FailData, 1);
+  data->task = g_object_ref (task);
+  data->error = error;
+
+  GSource *source = g_idle_source_new ();
+  g_source_set_callback (source, s3_fail_idle_cb, data, s3_fail_data_free);
+  g_source_attach (source, self->mainctx);
+  g_source_unref (source);
+}
+
+typedef struct
+{
+  OstreeFetcher *self; /* owned */
+  char *creds_key;
+} S3CredsFetch;
+
+static void
+s3_on_credentials (GObject *source, GAsyncResult *result, gpointer user_data)
+{
+  S3CredsFetch *fetch = user_data;
+  OstreeFetcher *self = fetch->self;
+  S3CredState *cs = g_hash_table_lookup (self->s3_creds, fetch->creds_key);
+  g_autoptr (GError) error = NULL;
+  g_autoptr (OstreeAwsCredentials) creds = _ostree_aws_get_credentials_finish (result, &error);
+  const guint64 now = s3_now ();
+
+  g_assert (cs != NULL);
+  cs->fetching = FALSE;
+
+  /* Credentials that are already expired would only be refetched again
+   * immediately; turn that into an error instead of a loop. */
+  if (creds != NULL && _ostree_aws_credentials_get_expiry (creds) <= now)
+    {
+      g_clear_pointer (&creds, _ostree_aws_credentials_unref);
+      g_set_error (&error, G_IO_ERROR, G_IO_ERROR_PERMISSION_DENIED,
+                   "AWS credential provider returned credentials that have already expired");
+    }
+  if (creds != NULL)
+    {
+      g_clear_pointer (&cs->creds, _ostree_aws_credentials_unref);
+      cs->creds = g_steal_pointer (&creds);
+      cs->fetched_at = now;
+    }
+
+  /* Take the list first: resuming a request can park it again. */
+  GQueue waiting = cs->waiting;
+  g_queue_init (&cs->waiting);
+  GTask *task;
+  while ((task = g_queue_pop_head (&waiting)) != NULL)
+    {
+      if (error == NULL)
+        initiate_next_curl_request (g_task_get_task_data (task), task);
+      else
+        s3_fail_request (self, task, g_error_copy (error));
+    }
+
+  g_object_unref (fetch->self);
+  g_free (fetch->creds_key);
+  g_free (fetch);
+}
+
+static void
+s3_start_credentials_fetch (OstreeFetcher *self, S3Remote *remote, S3CredState *cs)
+{
+  S3CredsFetch *fetch = g_new0 (S3CredsFetch, 1);
+  fetch->self = g_object_ref (self);
+  fetch->creds_key = g_strdup (remote->creds_key);
+
+  /* Replacing credentials we already hold means they are stale; the
+   * process-wide cache would just hand the same ones back. */
+  const gboolean force = cs->force_next || cs->creds != NULL;
+  cs->force_next = FALSE;
+  cs->fetching = TRUE;
+
+  /* The result is delivered on the thread-default context; make it ours. */
+  g_main_context_push_thread_default (self->mainctx);
+  _ostree_aws_get_credentials_async (remote->loc->profile, remote->region, force, NULL,
+                                     s3_on_credentials, fetch);
+  g_main_context_pop_thread_default (self->mainctx);
+}
+
+/* Prepare one attempt at an s3:// mirror.
+ *
+ * On success either *out_parked is TRUE (the request waits for
+ * credentials and will be re-initiated), or *out_url is the URL to
+ * request and the signed headers have been appended to req->req_headers.
+ */
+static gboolean
+s3_prepare_request (OstreeFetcher *self, FetcherRequest *req, GTask *task, GUri *baseuri,
+                    char **out_url, gboolean *out_parked, GError **error)
+{
+  S3Remote *remote = s3_get_remote (self, baseuri, error);
+  if (remote == NULL)
+    return FALSE;
+
+  S3CredState *cs = g_hash_table_lookup (self->s3_creds, remote->creds_key);
+  if (cs == NULL)
+    {
+      cs = g_new0 (S3CredState, 1);
+      g_queue_init (&cs->waiting);
+      g_hash_table_insert (self->s3_creds, g_strdup (remote->creds_key), cs);
+    }
+
+  if (cs->creds == NULL
+      || !_ostree_s3_credentials_usable (_ostree_aws_credentials_get_expiry (cs->creds),
+                                         cs->fetched_at, s3_now ()))
+    {
+      g_queue_push_tail (&cs->waiting, task);
+      if (!cs->fetching)
+        s3_start_credentials_fetch (self, remote, cs);
+      *out_parked = TRUE;
+      return TRUE;
+    }
+
+  g_autofree char *url
+      = _ostree_s3_location_to_request_url (remote->loc, remote->region, req->filename);
+  g_autoptr (GPtrArray) headers = g_ptr_array_new_with_free_func (g_free);
+  if (!_ostree_aws_sign_get (cs->creds, url, remote->region, headers, error))
+    return FALSE;
+  for (guint i = 0; i < headers->len; i++)
+    req->req_headers = curl_slist_append (req->req_headers, headers->pdata[i]);
+
+  req->s3_creds_key = remote->creds_key;
+  req->s3_creds = _ostree_aws_credentials_ref (cs->creds);
+  *out_url = g_steal_pointer (&url);
+  return TRUE;
+}
+
+/* Handle a non-2xx, non-304 response to an s3:// request. Exactly one of
+ * these happens: *out_retry is set (re-sign and retry the same mirror),
+ * *out_next_mirror is set, or @task is completed with an error. */
+static void
+s3_complete_error (OstreeFetcher *self, FetcherRequest *req, GTask *task, const char *eff_url,
+                   long response, gboolean retry_all, gboolean *out_next_mirror,
+                   gboolean *out_retry)
+{
+  g_autofree char *code = NULL;
+  g_autofree char *message = NULL;
+  g_autofree char *body_region = NULL;
+  if (req->s3_error_body != NULL)
+    (void)_ostree_s3_parse_error_body (req->s3_error_body->str, req->s3_error_body->len, &code,
+                                       &message, &body_region);
+
+  /* S3 reports ExpiredToken with HTTP 400 and RequestExpired with 403, so
+   * go by the error code, not the status. */
+  const gboolean expired
+      = code != NULL
+        && (g_str_equal (code, "ExpiredToken") || g_str_equal (code, "TokenRefreshRequired")
+            || g_str_equal (code, "RequestExpired"));
+  if (expired && !req->s3_retried_expired)
+    {
+      S3CredState *cs = g_hash_table_lookup (self->s3_creds, req->s3_creds_key);
+      /* Only drop the credentials this request was signed with: when many
+       * requests fail together, the first one may already have replaced them. */
+      if (cs != NULL && cs->creds == req->s3_creds)
+        {
+          g_clear_pointer (&cs->creds, _ostree_aws_credentials_unref);
+          cs->force_next = TRUE;
+        }
+      req->s3_retried_expired = TRUE;
+      *out_retry = TRUE;
+      return;
+    }
+
+  if (req->idx + 1 < req->mirrorlist->len)
+    {
+      *out_next_mirror = TRUE;
+      return;
+    }
+
+  const char *bucket_region = req->s3_bucket_region ?: body_region;
+  const gboolean wrong_region
+      = response == 301 || response == 307
+        || (code != NULL && g_str_equal (code, "AuthorizationHeaderMalformed")
+            && body_region != NULL);
+  GIOErrorEnum giocode;
+  g_autofree char *msg = NULL;
+
+  if (response == 404)
+    {
+      giocode = G_IO_ERROR_NOT_FOUND;
+      msg = g_strdup_printf ("While fetching %s: Server returned HTTP %ld", eff_url, response);
+    }
+  else if (wrong_region)
+    {
+      giocode = G_IO_ERROR_FAILED;
+      if (bucket_region != NULL)
+        msg = g_strdup_printf ("While fetching %s: bucket is in region %s; add ?region=%s to "
+                               "the s3:// URL",
+                               eff_url, bucket_region, bucket_region);
+      else
+        msg = g_strdup_printf ("While fetching %s: bucket is in a different region (HTTP %ld); "
+                               "set ?region= on the s3:// URL",
+                               eff_url, response);
+    }
+  else if (response == 403 || expired)
+    {
+      giocode = G_IO_ERROR_PERMISSION_DENIED;
+      msg = g_strdup_printf ("While fetching %s: S3 returned HTTP %ld %s: %s", eff_url, response,
+                             code ?: "(no error code)", message ?: "(no message)");
+    }
+  else
+    {
+      giocode = _ostree_fetcher_http_status_code_to_io_error (response, retry_all);
+      if (code != NULL)
+        msg = g_strdup_printf ("While fetching %s: S3 returned HTTP %ld %s: %s", eff_url, response,
+                               code, message ?: "(no message)");
+      else
+        msg = g_strdup_printf ("While fetching %s: Server returned HTTP %ld", eff_url, response);
+    }
+
+  g_task_return_new_error (task, G_IO_ERROR, giocode, "%s", msg);
+  if (self->remote_name
+      && !((req->flags & OSTREE_FETCHER_REQUEST_OPTIONAL_CONTENT) > 0
+           && giocode == G_IO_ERROR_NOT_FOUND))
+    _ostree_fetcher_journal_failure (self->remote_name, eff_url, msg);
+}
+#endif /* HAVE_AWS */
+
 /* Check for completed transfers, and remove their easy handles */
 static void
 check_multi_info (OstreeFetcher *fetcher)
@@ -326,6 +700,7 @@ check_multi_info (OstreeFetcher *fetcher)
       const char *eff_url;
       gboolean is_file;
       gboolean continued_request = FALSE;
+      gboolean s3_retry = FALSE;
 
       if (msg->msg != CURLMSG_DONE)
         continue;
@@ -380,7 +755,20 @@ check_multi_info (OstreeFetcher *fetcher)
               req->out_not_modified = TRUE;
             }
 
-          if (!is_file && !(response >= 200 && response < 300) && response != 304)
+#ifdef HAVE_AWS
+          const gboolean s3_failed
+              = req->is_s3 && !(response >= 200 && response < 300) && response != 304;
+#else
+          const gboolean s3_failed = FALSE;
+#endif
+          if (s3_failed)
+            {
+#ifdef HAVE_AWS
+              s3_complete_error (fetcher, req, task, eff_url, response, retry_all,
+                                 &continued_request, &s3_retry);
+#endif
+            }
+          else if (!is_file && !(response >= 200 && response < 300) && response != 304)
             {
               GIOErrorEnum giocode
                   = _ostree_fetcher_http_status_code_to_io_error (response, retry_all);
@@ -437,6 +825,10 @@ check_multi_info (OstreeFetcher *fetcher)
       if (continued_request)
         {
           req->idx++;
+          initiate_next_curl_request (req, task);
+        }
+      else if (s3_retry)
+        {
           initiate_next_curl_request (req, task);
         }
       else
@@ -592,6 +984,25 @@ write_cb (void *ptr, size_t size, size_t nmemb, void *data)
   if (req->caught_write_error)
     return -1;
 
+#ifdef HAVE_AWS
+  if (req->is_s3)
+    {
+      long response = 0;
+      (void)curl_easy_getinfo (req->easy, CURLINFO_RESPONSE_CODE, &response);
+      if (!(response >= 200 && response < 300))
+        {
+          /* An error document, not content: keep a bounded copy for the
+           * error message and never let it reach the output. */
+          if (req->s3_error_body == NULL)
+            req->s3_error_body = g_string_new (NULL);
+          if (req->s3_error_body->len < S3_ERROR_BODY_MAX)
+            g_string_append_len (req->s3_error_body, ptr,
+                                 MIN (realsize, S3_ERROR_BODY_MAX - req->s3_error_body->len));
+          return realsize;
+        }
+    }
+#endif
+
   if (req->max_size > 0)
     {
       if (realsize > req->max_size || (realsize + req->current_size) > req->max_size)
@@ -658,6 +1069,13 @@ response_header_cb (const char *buffer, size_t size, size_t n_items, void *user_
       g_autoptr (GDateTime) dt = _ostree_parse_rfc2616_date_time (lm, strlen (lm));
       req->out_last_modified = (dt != NULL) ? g_date_time_to_unix (dt) : 0;
     }
+#ifdef HAVE_AWS
+  else if (req->is_s3 && g_ascii_strncasecmp (line, "x-amz-bucket-region:", 20) == 0)
+    {
+      g_free (req->s3_bucket_region);
+      req->s3_bucket_region = g_strdup (g_strstrip (line + 20));
+    }
+#endif
 
   return real_size;
 }
@@ -693,6 +1111,12 @@ request_unref (FetcherRequest *req)
   g_free (req->out_etag);
   g_clear_pointer (&req->req_headers, curl_slist_free_all);
   curl_easy_cleanup (req->easy);
+#ifdef HAVE_AWS
+  if (req->s3_error_body)
+    g_string_free (req->s3_error_body, TRUE);
+  g_free (req->s3_bucket_region);
+  g_clear_pointer (&req->s3_creds, _ostree_aws_credentials_unref);
+#endif
 
   g_free (req);
 }
@@ -733,6 +1157,13 @@ _ostree_fetcher_set_max_outstanding_fetcher_requests (OstreeFetcher *self,
                                                       guint32 opt_max_outstanding_fetcher_requests)
 {
   self->opt_max_outstanding_fetcher_requests = opt_max_outstanding_fetcher_requests;
+#if CURL_AT_LEAST_VERSION(7, 30, 0)
+  /* Servers that only speak HTTP/1.1 (S3 among them) get their concurrency
+   * from parallel connections, so don't cap those below the request limit. */
+  CURLMcode rc = curl_multi_setopt (self->multi, CURLMOPT_MAX_TOTAL_CONNECTIONS,
+                                    (long)MAX (8, opt_max_outstanding_fetcher_requests));
+  g_assert_cmpint (rc, ==, CURLM_OK);
+#endif
 }
 
 void
@@ -814,16 +1245,43 @@ initiate_next_curl_request (FetcherRequest *req, GTask *task)
   CURLcode rc;
   OstreeFetcher *self = req->fetcher;
 
-  if (req->easy)
-    curl_easy_cleanup (req->easy);
-  req->easy = curl_easy_init ();
-  g_assert (req->easy);
+  /* The old handle must go before anything it points at is freed below. */
+  g_clear_pointer (&req->easy, curl_easy_cleanup);
 
   g_assert_cmpint (req->idx, <, req->mirrorlist->len);
 
   GUri *baseuri = req->mirrorlist->pdata[req->idx];
+  g_autofree char *s3_url = NULL;
+
+#ifdef HAVE_AWS
+  req->is_s3 = g_str_equal (g_uri_get_scheme (baseuri), "s3");
+  if (req->is_s3)
+    {
+      g_autoptr (GError) s3_error = NULL;
+      gboolean parked = FALSE;
+
+      /* Every attempt is signed afresh; never resend a stale signature. */
+      g_clear_pointer (&req->req_headers, curl_slist_free_all);
+      g_clear_pointer (&req->s3_creds, _ostree_aws_credentials_unref);
+      g_clear_pointer (&req->s3_bucket_region, g_free);
+      if (req->s3_error_body)
+        g_string_truncate (req->s3_error_body, 0);
+
+      if (!s3_prepare_request (self, req, task, baseuri, &s3_url, &parked, &s3_error))
+        {
+          s3_fail_request (self, task, g_steal_pointer (&s3_error));
+          return;
+        }
+      if (parked)
+        return;
+    }
+#endif
+
+  req->easy = curl_easy_init ();
+  g_assert (req->easy);
+
   {
-    g_autofree char *uri = request_get_uri (req, baseuri);
+    g_autofree char *uri = s3_url ? g_strdup (s3_url) : request_get_uri (req, baseuri);
     rc = curl_easy_setopt (req->easy, CURLOPT_URL, uri);
     g_assert_cmpint (rc, ==, CURLM_OK);
   }
@@ -981,6 +1439,16 @@ initiate_next_curl_request (FetcherRequest *req, GTask *task)
   g_assert_cmpint (rc, ==, CURLM_OK);
   rc = curl_easy_setopt (req->easy, CURLOPT_FOLLOWLOCATION, 1L);
   g_assert_cmpint (rc, ==, CURLM_OK);
+#ifdef HAVE_AWS
+  if (req->is_s3)
+    {
+      /* curl forwards custom headers to redirect targets, which would hand
+       * the signature and session token to another host. An S3 redirect
+       * means "wrong region"; s3_complete_error() reports it. */
+      rc = curl_easy_setopt (req->easy, CURLOPT_FOLLOWLOCATION, 0L);
+      g_assert_cmpint (rc, ==, CURLM_OK);
+    }
+#endif
   rc = curl_easy_setopt (req->easy, CURLOPT_CONNECTTIMEOUT, 30L);
   g_assert_cmpint (rc, ==, CURLM_OK);
   rc = curl_easy_setopt (req->easy, CURLOPT_LOW_SPEED_LIMIT, req->fetcher->opt_low_speed_limit);
