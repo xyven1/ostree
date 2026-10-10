@@ -156,7 +156,7 @@ In `ostree-core-private.h`:
   compressors, so callers stay free of `#ifdef`.
 - `_ostree_loose_path()` picks the suffix from the mode: `""`, `"z"` or
   `"zst"`.
-- `_ostree_content_stream_parse_archive (mode, ...)` — the body of today's
+- `_ostree_content_stream_parse_for_mode (mode, ...)` — the body of today's
   `ostree_content_stream_parse()`, taking a repo mode instead of a
   `gboolean compressed`. The public function keeps its signature and
   meaning (`compressed == TRUE` means zlib) and calls the new helper.
@@ -173,8 +173,7 @@ In `ostree-core-private.h`:
 - Checkout, commit devino cache, payload-link and size accounting: switch to
   `_ostree_repo_mode_is_archive()`.
 - `ostree_raw_file_to_archive_z2_stream*()` are public and stay zlib-only.
-  Their internal callers that feed a repository use a new private
-  mode-aware equivalent.
+  Nothing inside libostree calls them, so no mode-aware variant is needed.
 
 ### 6.5 Pull
 
@@ -237,13 +236,20 @@ mirroring one into the other.
   empty, small and multi-megabyte random and compressible buffers through
   the converters; truncated input fails; garbage input fails.
 - `tests/test-archive-zstd.sh`: `setup_test_repository "archive-zstd"` then
-  the shared `archive-test.sh` and `basic-test.sh` bodies, plus checks that
-  objects are named `.filezst` and begin their payload with the zstd magic.
+  the shared `archive-test.sh` body, plus checks that objects are named
+  `.filezst` and begin their payload with the zstd magic; round trips of
+  empty files, symlinks, incompressible and multi-megabyte content;
+  `zstd-level` clamping; detection of truncated, corrupted and
+  wrong-format objects; and prune. (`basic-test.sh` is not reused: no
+  existing wrapper runs it against an archive repository, so failures there
+  would not be attributable to this change.)
 - `tests/test-pull-archive-zstd.sh`: `setup_fake_remote_repo1
   "archive-zstd"` then the shared `pull-test.sh` body into a `bare-user`
-  repository (the same shape as `test-pull-bareuser.sh`), plus mirror
-  `archive` → `archive-zstd` and back, `fsck` each result, and compare
-  commit checksums.
+  repository (the same shape as `test-pull-bareuser.sh`).
+- `tests/test-pull-mirror-archive-zstd.sh`: mirror `archive` →
+  `archive-zstd` and back, with and without `--http-trusted`, `fsck` each
+  result, compare commit checksums, and check each mirror holds only its
+  own object suffix.
 - `tests/libtest.sh`: teach the object-suffix helper about `archive-zstd`.
 - All new shell tests start with `skip_without_ostree_feature zstd`.
 - Regression: the existing `archive` tests (`test-archivez.sh`,
