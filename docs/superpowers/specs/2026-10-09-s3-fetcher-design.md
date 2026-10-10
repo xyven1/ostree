@@ -386,3 +386,69 @@ upstream:
 6. integration test
 7. manual checklist and benchmark script
 8. `flake.nix`
+
+## 13. Amendments from planning
+
+Found while writing the implementation plan
+(`docs/superpowers/plans/2026-10-09-s3-fetcher.md`). Where these differ
+from sections 1-12, this section wins.
+
+### Verified
+
+- Both assumptions in section 11 hold against aws-c-auth 0.9.1: signing
+  with explicit credentials completes synchronously on the calling thread,
+  and the SSO provider constructor returns NULL for a profile without SSO
+  settings. The fallbacks are not needed.
+
+### Corrections
+
+- **Expired tokens arrive as HTTP 400.** Real S3 returns `ExpiredToken`
+  with status 400, not 403. The retry-once rule in 5.2 keys on the S3
+  error code (`ExpiredToken`, `TokenRefreshRequired`, `RequestExpired`)
+  whatever the status.
+- **Wrong region is not always a redirect.** With SigV4, S3 can answer
+  400 `AuthorizationHeaderMalformed` carrying the right `<Region>`. That
+  is reported the same way as a 301/307 in section 6.
+- **SSO-expired cannot be detected from the chain's error.** The chain
+  reports only its last provider's failure. The message from 5.3 is
+  therefore appended whenever credential resolution fails and the profile
+  is SSO-configured.
+- **Upstream already treats HTTP 403 as not-found for `http(s)://`
+  remotes** (`ostree-fetcher-util.c`). The strict 403 policy in section 2
+  makes `s3://` deliberately stricter than existing remotes; it is not
+  matching existing behaviour.
+- **`max-outstanding-fetcher-requests` is a no-op upstream.** The pull
+  code reads it with GVariant type `b` while the CLI stores `u`. The fix
+  (one character, two sites) is part of this work because section 7's
+  default and benchmark depend on the option working. It also makes the
+  option take effect for `http(s)://` remotes.
+
+### Interface changes to sections 4.2 and 4.3
+
+- `_ostree_s3_location_to_request_url` takes a third argument, the
+  request's subpath.
+- Added `_ostree_s3_credentials_usable (expiry, fetched_at, now)`: the
+  refresh rule from 5.2 as a pure function, plus a guard so credentials
+  that arrive already inside the 300-second window are used for up to 60
+  seconds instead of being refetched in a loop.
+- Added `_ostree_aws_credentials_new_static` and
+  `_ostree_aws_sign_get_at` (explicit timestamp) as test seams.
+- A forced credential refresh replaces the cached provider and leaks the
+  old one, since another fetcher may have a query in flight on it.
+
+### Gaps filled
+
+- Buckets that are not a valid DNS label (uppercase, underscore, shorter
+  than 3 or longer than 63 characters) use path-style addressing, like
+  dotted buckets in section 3.
+- An `?endpoint=` remote with no resolvable region signs with
+  `us-east-1`.
+- A port in the `s3://` authority is rejected.
+
+### Environment
+
+- nixpkgs marks MinIO insecure (unmaintained). The dev-shell flake permits
+  that single package; it is run only on localhost by the integration
+  test.
+- The dev shell is the first commit, not the last as listed in section
+  12, because nothing builds without it.
