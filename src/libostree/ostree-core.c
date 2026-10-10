@@ -38,6 +38,7 @@
 G_STATIC_ASSERT (OSTREE_REPO_MODE_BARE == 0);
 G_STATIC_ASSERT (OSTREE_REPO_MODE_ARCHIVE_Z2 == 1);
 G_STATIC_ASSERT (OSTREE_REPO_MODE_ARCHIVE == OSTREE_REPO_MODE_ARCHIVE_Z2);
+G_STATIC_ASSERT (OSTREE_REPO_MODE_ARCHIVE_ZSTD == 5);
 G_STATIC_ASSERT (OSTREE_REPO_MODE_BARE_USER == 2);
 G_STATIC_ASSERT (OSTREE_REPO_MODE_BARE_USER_ONLY == 3);
 G_STATIC_ASSERT (OSTREE_REPO_MODE_BARE_SPLIT_XATTRS == 4);
@@ -1628,13 +1629,21 @@ ostree_checksum_bytes_peek_validate (GVariant *bytes, GError **error)
 void
 _ostree_loose_path (char *buf, const char *checksum, OstreeObjectType objtype, OstreeRepoMode mode)
 {
+  const char *suffix = "";
+  if (!OSTREE_OBJECT_TYPE_IS_META (objtype))
+    {
+      if (mode == OSTREE_REPO_MODE_ARCHIVE)
+        suffix = "z";
+      else if (mode == OSTREE_REPO_MODE_ARCHIVE_ZSTD)
+        suffix = "zst";
+    }
+
   *buf = checksum[0];
   buf++;
   *buf = checksum[1];
   buf++;
   snprintf (buf, _OSTREE_LOOSE_PATH_MAX - 2, "/%s.%s%s", checksum + 2,
-            ostree_object_type_to_string (objtype),
-            (!OSTREE_OBJECT_TYPE_IS_META (objtype) && mode == OSTREE_REPO_MODE_ARCHIVE) ? "z" : "");
+            ostree_object_type_to_string (objtype), suffix);
 }
 
 /**
@@ -1778,28 +1787,34 @@ _ostree_mode_uidgid_to_gfileinfo (mode_t mode, uid_t uid, gid_t gid)
  * _ostree_get_relative_object_path:
  * @checksum: ASCII checksum string
  * @type: Object type
- * @compressed: Whether or not the repository object is compressed
+ * @mode: Repository mode, which determines the content object suffix
  *
  * Returns: (transfer full): Relative path for a loose object
  */
 char *
-_ostree_get_relative_object_path (const char *checksum, OstreeObjectType type, gboolean compressed)
+_ostree_get_relative_object_path (const char *checksum, OstreeObjectType type, OstreeRepoMode mode)
 {
-  GString *path;
+  char loose_path[_OSTREE_LOOSE_PATH_MAX];
 
   g_assert (strlen (checksum) == OSTREE_SHA256_STRING_LEN);
 
-  path = g_string_new ("objects/");
+  _ostree_loose_path (loose_path, checksum, type, mode);
+  return g_strconcat ("objects/", loose_path, NULL);
+}
 
-  g_string_append_len (path, checksum, 2);
-  g_string_append_c (path, '/');
-  g_string_append (path, checksum + 2);
-  g_string_append_c (path, '.');
-  g_string_append (path, ostree_object_type_to_string (type));
-  if (!OSTREE_OBJECT_TYPE_IS_META (type) && compressed)
-    g_string_append (path, "z");
-
-  return g_string_free (path, FALSE);
+/* Fail if @mode needs a compressor this build lacks. */
+gboolean
+_ostree_repo_mode_check_supported (OstreeRepoMode mode, GError **error)
+{
+#ifndef HAVE_ZSTD
+  if (mode == OSTREE_REPO_MODE_ARCHIVE_ZSTD)
+    {
+      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                           "This build of ostree does not support archive-zstd repositories");
+      return FALSE;
+    }
+#endif
+  return TRUE;
 }
 
 static GString *

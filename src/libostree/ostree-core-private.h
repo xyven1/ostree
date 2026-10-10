@@ -28,6 +28,9 @@ G_BEGIN_DECLS
 /* It's what gzip does, 9 is too slow */
 #define OSTREE_ARCHIVE_DEFAULT_COMPRESSION_LEVEL (6)
 
+/* The zstd library default; see docs/formats.md */
+#define OSTREE_ARCHIVE_ZSTD_DEFAULT_COMPRESSION_LEVEL (3)
+
 /* Note the permissive group bits. We want to be liberal here and let individual machines
  * narrow permissions as needed via umask. This is important in setups where group ownership
  * can matter for repo management (like OpenShift). */
@@ -110,7 +113,7 @@ _ostree_checksum_inplace_from_bytes_v (GVariant *csum_v, char *buf)
 #define _OSTREE_OBJECT_SIZES_ENTRY_SIGNATURE "ay"
 
 char *_ostree_get_relative_object_path (const char *checksum, OstreeObjectType type,
-                                        gboolean compressed);
+                                        OstreeRepoMode mode);
 
 char *_ostree_get_relative_static_delta_path (const char *from, const char *to, const char *target);
 
@@ -162,6 +165,16 @@ _ostree_repo_mode_is_bare (OstreeRepoMode mode)
   return mode == OSTREE_REPO_MODE_BARE || mode == OSTREE_REPO_MODE_BARE_USER
          || mode == OSTREE_REPO_MODE_BARE_USER_ONLY || mode == OSTREE_REPO_MODE_BARE_SPLIT_XATTRS;
 }
+
+/* Archive modes store each content object as a header followed by a
+ * compressed payload; they differ only in the compressor and file suffix. */
+static inline gboolean
+_ostree_repo_mode_is_archive (OstreeRepoMode mode)
+{
+  return mode == OSTREE_REPO_MODE_ARCHIVE || mode == OSTREE_REPO_MODE_ARCHIVE_ZSTD;
+}
+
+gboolean _ostree_repo_mode_check_supported (OstreeRepoMode mode, GError **error);
 
 #ifndef OSTREE_DISABLE_GPGME
 GVariant *_ostree_detached_metadata_append_gpg_sig (GVariant *existing_metadata,

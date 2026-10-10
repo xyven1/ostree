@@ -749,6 +749,54 @@ test_list_static_delta_entries (void)
   g_assert_cmpstr (indexes->pdata[0], ==, to_checksum);
 }
 
+static void
+test_repo_mode_archive_zstd_strings (void)
+{
+  g_autoptr (GError) error = NULL;
+  OstreeRepoMode mode = OSTREE_REPO_MODE_BARE;
+
+  g_assert_cmpint (OSTREE_REPO_MODE_ARCHIVE_ZSTD, ==, 5);
+
+  g_assert_true (ostree_repo_mode_from_string ("archive-zstd", &mode, &error));
+  g_assert_no_error (error);
+  g_assert_cmpint (mode, ==, OSTREE_REPO_MODE_ARCHIVE_ZSTD);
+
+  /* The existing archive mode is untouched */
+  g_assert_true (ostree_repo_mode_from_string ("archive", &mode, &error));
+  g_assert_cmpint (mode, ==, OSTREE_REPO_MODE_ARCHIVE);
+  g_assert_true (ostree_repo_mode_from_string ("archive-z2", &mode, &error));
+  g_assert_cmpint (mode, ==, OSTREE_REPO_MODE_ARCHIVE);
+
+  /* Creating a repository writes the mode string to its config, unless this
+   * build has no zstd, in which case it must refuse cleanly. */
+  g_autofree char *tmpdir = g_dir_make_tmp ("ostree-test-zstd-mode-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autofree char *repopath = g_build_filename (tmpdir, "repo", NULL);
+  g_autoptr (OstreeRepo) repo = ostree_repo_create_at (AT_FDCWD, repopath,
+                                                       OSTREE_REPO_MODE_ARCHIVE_ZSTD, NULL, NULL,
+                                                       &error);
+  if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED))
+    {
+      g_assert_null (repo);
+      g_assert_nonnull (strstr (error->message, "does not support archive-zstd repositories"));
+      g_autofree char *configpath = g_build_filename (repopath, "config", NULL);
+      g_assert_false (g_file_test (configpath, G_FILE_TEST_EXISTS));
+      (void)glnx_shutil_rm_rf_at (AT_FDCWD, tmpdir, NULL, NULL);
+      g_test_skip ("no zstd support compiled in");
+      return;
+    }
+  g_assert_no_error (error);
+  g_assert_nonnull (repo);
+  g_assert_cmpint (ostree_repo_get_mode (repo), ==, OSTREE_REPO_MODE_ARCHIVE_ZSTD);
+
+  g_autofree char *mode_str
+      = g_key_file_get_string (ostree_repo_get_config (repo), "core", "mode", &error);
+  g_assert_no_error (error);
+  g_assert_cmpstr (mode_str, ==, "archive-zstd");
+
+  (void)glnx_shutil_rm_rf_at (AT_FDCWD, tmpdir, NULL, NULL);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -771,6 +819,7 @@ main (int argc, char **argv)
   g_test_add_func ("/read-xattrs", test_read_xattrs);
   g_test_add_func ("/dirmeta-xattrs", test_dirmeta_xattrs);
   g_test_add_func ("/list-static-delta-entries", test_list_static_delta_entries);
+  g_test_add_func ("/repo-mode-archive-zstd-strings", test_repo_mode_archive_zstd_strings);
 
   return g_test_run ();
 out:

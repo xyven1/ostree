@@ -1921,7 +1921,8 @@ start_fetch (OtPullData *pull_data, FetchObjectData *fetch)
     }
   else
     {
-      obj_subpath = _ostree_get_relative_object_path (expected_checksum, objtype, TRUE);
+      obj_subpath
+          = _ostree_get_relative_object_path (expected_checksum, objtype, OSTREE_REPO_MODE_ARCHIVE);
       mirrorlist = pull_data->content_mirrorlist;
     }
 

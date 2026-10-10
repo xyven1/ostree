@@ -202,6 +202,9 @@ typedef enum
  * only be used for user checkouts. Does not need xattrs.
  * @OSTREE_REPO_MODE_BARE_SPLIT_XATTRS: Same as BARE_USER, but xattrs are stored separately from
  * file content, with dedicated object types.
+ * @OSTREE_REPO_MODE_ARCHIVE_ZSTD: Like `OSTREE_REPO_MODE_ARCHIVE`, but content objects are
+ * compressed with zstd instead of zlib.  Requires libostree to be built with zstd support.
+ * Since: 2026.5
  *
  * See the documentation of #OstreeRepo for more information about the
  * possible modes.
@@ -214,6 +217,7 @@ typedef enum
   OSTREE_REPO_MODE_BARE_USER,
   OSTREE_REPO_MODE_BARE_USER_ONLY,
   OSTREE_REPO_MODE_BARE_SPLIT_XATTRS,
+  OSTREE_REPO_MODE_ARCHIVE_ZSTD,
 } OstreeRepoMode;
 
 /**

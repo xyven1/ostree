@@ -95,7 +95,9 @@ G_STATIC_ASSERT (sizeof (OstreeRepoPruneOptions)
  * checkouts. This mode does not require xattrs. A %OSTREE_REPO_MODE_ARCHIVE
  * (also known as %OSTREE_REPO_MODE_ARCHIVE_Z2) repository in contrast stores
  * content files zlib-compressed. It is suitable for non-root-owned
- * repositories that can be served via a static HTTP server.
+ * repositories that can be served via a static HTTP server. A
+ * %OSTREE_REPO_MODE_ARCHIVE_ZSTD repository is the same, but compresses with
+ * zstd.
  *
  * Creating an #OstreeRepo does not invoke any file I/O, and thus needs
  * to be initialized, either from existing contents or as a new
@@ -2596,6 +2598,9 @@ ostree_repo_mode_to_string (OstreeRepoMode mode, const char **out_mode, GError *
     case OSTREE_REPO_MODE_BARE_SPLIT_XATTRS:
       ret_mode = "bare-split-xattrs";
       break;
+    case OSTREE_REPO_MODE_ARCHIVE_ZSTD:
+      ret_mode = "archive-zstd";
+      break;
     default:
       return glnx_throw (error, "Invalid mode '%d'", mode);
     }
@@ -2625,6 +2630,8 @@ ostree_repo_mode_from_string (const char *mode, OstreeRepoMode *out_mode, GError
     ret_mode = OSTREE_REPO_MODE_ARCHIVE;
   else if (strcmp (mode, "bare-split-xattrs") == 0)
     ret_mode = OSTREE_REPO_MODE_BARE_SPLIT_XATTRS;
+  else if (strcmp (mode, "archive-zstd") == 0)
+    ret_mode = OSTREE_REPO_MODE_ARCHIVE_ZSTD;
   else
     return glnx_throw (error, "Invalid mode '%s' in repository configuration", mode);
 
@@ -2646,6 +2653,10 @@ repo_create_at_internal (int dfd, const char *path, OstreeRepoMode mode, GVarian
   /* We do objects/ last - if it exists we do nothing and exit successfully */
   const char *state_dirs[] = { "tmp",        "extensions",   "state",        "refs",
                                "refs/heads", "refs/mirrors", "refs/remotes", "objects" };
+
+  /* Before creating anything on disk */
+  if (!_ostree_repo_mode_check_supported (mode, error))
+    return FALSE;
 
   /* Early return if we have an existing repo */
   {
@@ -3099,6 +3110,8 @@ reload_core_config (OstreeRepo *self, GCancellable *cancellable, GError **error)
   if (!ot_keyfile_get_value_with_default (self->config, "core", "mode", "bare", &mode, error))
     return FALSE;
   if (!ostree_repo_mode_from_string (mode, &self->mode, error))
+    return FALSE;
+  if (!_ostree_repo_mode_check_supported (self->mode, error))
     return FALSE;
 
   if (self->writable)
