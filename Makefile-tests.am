@@ -217,6 +217,12 @@ else
 EXTRA_DIST += $(libsoup_tests)
 endif
 
+if USE_AWS
+_installed_or_uninstalled_test_scripts += tests/test-pull-s3.sh
+else
+EXTRA_DIST += tests/test-pull-s3.sh
+endif
+
 # These call into gjs scripts
 js_tests = tests/test-corruption.sh tests/test-pull-corruption.sh
 if BUILDOPT_GJS
