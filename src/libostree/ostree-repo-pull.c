@@ -967,8 +967,9 @@ content_fetch_on_complete (GObject *object, GAsyncResult *result, gpointer user_
       tmpf_input = g_unix_input_stream_new (g_steal_fd (&tmpf.fd), TRUE);
 
       /* If it appears corrupted, we'll delete it below */
-      if (!ostree_content_stream_parse (TRUE, tmpf_input, stbuf.st_size, FALSE, &file_in,
-                                        &file_info, &xattrs, cancellable, error))
+      if (!_ostree_content_stream_parse_for_mode (pull_data->remote_mode, tmpf_input,
+                                                  stbuf.st_size, FALSE, &file_in, &file_info,
+                                                  &xattrs, cancellable, error))
         {
           g_prefix_error (error, "Parsing %s: ", checksum_obj);
           goto out;
@@ -1922,7 +1923,7 @@ start_fetch (OtPullData *pull_data, FetchObjectData *fetch)
   else
     {
       obj_subpath
-          = _ostree_get_relative_object_path (expected_checksum, objtype, OSTREE_REPO_MODE_ARCHIVE);
+          = _ostree_get_relative_object_path (expected_checksum, objtype, pull_data->remote_mode);
       mirrorlist = pull_data->content_mirrorlist;
     }
 
@@ -3979,7 +3980,7 @@ ostree_repo_pull_with_options (OstreeRepo *self, const char *remote_name_or_base
        * paying the cost of exploding it, checksumming, and re-gzip.
        */
       const gboolean mirroring_into_archive
-          = pull_data->is_mirror && pull_data->repo->mode == OSTREE_REPO_MODE_ARCHIVE;
+          = pull_data->is_mirror && _ostree_repo_mode_is_archive (pull_data->repo->mode);
       const gboolean import_trusted
           = !verifying_bareuseronly
             && (pull_data->importflags & _OSTREE_REPO_IMPORT_FLAGS_TRUSTED) > 0;
@@ -3987,7 +3988,7 @@ ostree_repo_pull_with_options (OstreeRepo *self, const char *remote_name_or_base
     }
 
   /* We can't use static deltas if pulling into an archive repo. */
-  if (self->mode == OSTREE_REPO_MODE_ARCHIVE)
+  if (_ostree_repo_mode_is_archive (self->mode))
     {
       if (pull_data->require_static_deltas)
         {
@@ -4514,12 +4515,50 @@ ostree_repo_pull_with_options (OstreeRepo *self, const char *remote_name_or_base
       remote_mode_loaded = TRUE;
     }
 
-  if (remote_mode_loaded && pull_data->remote_repo_local == NULL
-      && pull_data->remote_mode != OSTREE_REPO_MODE_ARCHIVE)
+  if (!remote_mode_loaded && pull_data->remote_repo_local == NULL)
     {
-      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
-                   "Can't pull from archives with mode \"%s\"", remote_mode_str);
-      goto out;
+      /* The summary (if any) didn't tell us the remote's mode, which we need
+       * in order to know how its content objects are named and compressed.
+       * Ask its `config` file; this is usually already loaded above.  For
+       * compatibility, a remote whose config can't be fetched is assumed to be
+       * a zlib archive, which was the only possibility historically. */
+      if (remote_config == NULL)
+        (void)load_remote_repo_config (pull_data, &remote_config, cancellable, NULL);
+
+      if (remote_config != NULL)
+        {
+          g_clear_pointer (&remote_mode_str, g_free);
+          if (!ot_keyfile_get_value_with_default (remote_config, "core", "mode", "bare",
+                                                  &remote_mode_str, error))
+            goto out;
+
+          if (!ostree_repo_mode_from_string (remote_mode_str, &pull_data->remote_mode, error))
+            goto out;
+        }
+      else
+        {
+          g_clear_pointer (&remote_mode_str, g_free);
+          remote_mode_str = g_strdup ("archive-z2");
+          pull_data->remote_mode = OSTREE_REPO_MODE_ARCHIVE;
+        }
+    }
+
+  if (pull_data->remote_repo_local == NULL)
+    {
+      if (!_ostree_repo_mode_is_archive (pull_data->remote_mode))
+        {
+          g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                       "Can't pull from archives with mode \"%s\"", remote_mode_str);
+          goto out;
+        }
+
+      if (!_ostree_repo_mode_check_supported (pull_data->remote_mode, error))
+        goto out;
+
+      /* The fast path that stores fetched content objects without parsing them
+       * is only valid when the remote uses exactly our on-disk format. */
+      if (pull_data->trusted_http_direct && pull_data->remote_mode != pull_data->repo->mode)
+        pull_data->trusted_http_direct = FALSE;
     }
 
   /* Resolve the checksum for each ref. This has to be done into a new hash table,

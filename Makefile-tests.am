@@ -84,6 +84,8 @@ _installed_or_uninstalled_test_scripts = \
 	tests/test-parent.sh \
 	tests/test-pull-bare.sh \
 	tests/test-pull-bareuser.sh \
+	tests/test-pull-archive-zstd.sh \
+	tests/test-pull-mirror-archive-zstd.sh \
 	tests/test-pull-bareuseronly.sh \
 	tests/test-pull2-bareuseronly.sh \
 	tests/test-pull-commit-only.sh \
