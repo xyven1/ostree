@@ -181,7 +181,8 @@ count_connections () {
     new_client_repo repo7 "${s3url}"
     OSTREE_DEBUG_HTTP=1 ostree_as ${root_user} ${root_secret} "" --repo=repo7 pull \
         --disable-static-deltas --max-outstanding-fetcher-requests=$1 origin main 2>debug.txt >/dev/null
-    grep -c 'Connected to ' debug.txt || true
+    # curl >= 8.16 says "Established connection to", older curl "Connected to"
+    grep -c -E '^\* (Connected to|Established connection to) ' debug.txt || true
 }
 serial=$(count_connections 1)
 parallel=$(count_connections 16)

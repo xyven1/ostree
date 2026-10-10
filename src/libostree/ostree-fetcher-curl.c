@@ -1421,6 +1421,17 @@ initiate_next_curl_request (FetcherRequest *req, GTask *task)
       g_assert_cmpint (rc, ==, CURLM_OK);
     }
 
+#if defined(HAVE_AWS) && (CURLPIPE_MULTIPLEX > 0)
+  if (req->is_s3)
+    {
+      /* S3 only speaks HTTP/1.1. With CURLOPT_PIPEWAIT set, curl holds each
+       * new request back on the existing connection in case it turns out to
+       * multiplex, which makes the whole pull serial on one connection. */
+      rc = curl_easy_setopt (req->easy, CURLOPT_PIPEWAIT, 0L);
+      g_assert_cmpint (rc, ==, CURLM_OK);
+    }
+#endif
+
   rc = curl_easy_setopt (req->easy, CURLOPT_WRITEFUNCTION, write_cb);
   g_assert_cmpint (rc, ==, CURLM_OK);
   rc = curl_easy_setopt (req->easy, CURLOPT_HEADERFUNCTION, response_header_cb);

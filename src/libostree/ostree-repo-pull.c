@@ -65,6 +65,9 @@
 #define OPT_LOWSPEEDTIME_DEFAULT 30
 #define OPT_RETRYALL_DEFAULT TRUE
 #define OPT_OSTREE_MAX_OUTSTANDING_FETCHER_REQUESTS_DEFAULT 8
+/* S3 only speaks HTTP/1.1, so concurrency comes from parallel connections
+ * rather than HTTP/2 multiplexing. */
+#define OPT_OSTREE_MAX_OUTSTANDING_FETCHER_REQUESTS_S3_DEFAULT 32
 
 typedef struct
 {
@@ -3605,7 +3608,7 @@ ostree_repo_pull_with_options (OstreeRepo *self, const char *remote_name_or_base
       opt_retry_all_set
           = g_variant_lookup (options, "retry-all-network-errors", "b", &pull_data->retry_all);
       opt_max_outstanding_fetcher_requests_set
-          = g_variant_lookup (options, "max-outstanding-fetcher-requests", "b",
+          = g_variant_lookup (options, "max-outstanding-fetcher-requests", "u",
                               &pull_data->max_outstanding_fetcher_requests);
       opt_n_network_retries_set
           = g_variant_lookup (options, "n-network-retries", "u", &pull_data->n_network_retries);
@@ -3912,6 +3915,21 @@ ostree_repo_pull_with_options (OstreeRepo *self, const char *remote_name_or_base
           goto out;
       }
   }
+
+  /* The fetcher was created before the URLs were known; raise its
+   * concurrency now if content comes from S3 and the caller didn't choose. */
+  if (!opt_max_outstanding_fetcher_requests_set)
+    {
+      OstreeFetcherURI *first_content_uri = pull_data->content_mirrorlist->pdata[0];
+      g_autofree char *content_scheme = _ostree_fetcher_uri_get_scheme (first_content_uri);
+      if (g_str_equal (content_scheme, "s3"))
+        {
+          pull_data->max_outstanding_fetcher_requests
+              = OPT_OSTREE_MAX_OUTSTANDING_FETCHER_REQUESTS_S3_DEFAULT;
+          _ostree_fetcher_set_max_outstanding_fetcher_requests (
+              pull_data->fetcher, pull_data->max_outstanding_fetcher_requests);
+        }
+    }
 
   /* FIXME: Do we want an analogue of this which supports collection IDs? */
   if (!ostree_repo_get_remote_list_option (self, remote_name_or_baseurl, "branches",
@@ -4869,6 +4887,8 @@ ostree_repo_pull_with_options (OstreeRepo *self, const char *remote_name_or_base
               break;
             }
         }
+      else if (g_str_equal (first_scheme, "s3"))
+        g_string_append (msg, "s3: SigV4");
       g_string_append (msg, "\n");
 
       if (pull_data->n_fetched_deltaparts > 0)
@@ -6384,7 +6404,7 @@ ostree_repo_remote_fetch_summary_with_options (OstreeRepo *self, const char *nam
       (void)g_variant_lookup (options, "low-speed-limit-bytes", "u", &low_speed_limit);
       (void)g_variant_lookup (options, "low-speed-time-seconds", "u", &low_speed_time);
       (void)g_variant_lookup (options, "retry-all-network-errors", "b", &retry_all);
-      (void)g_variant_lookup (options, "max-outstanding-fetcher-requests", "b",
+      (void)g_variant_lookup (options, "max-outstanding-fetcher-requests", "u",
                               &max_outstanding_fetcher_requests);
     }
 
