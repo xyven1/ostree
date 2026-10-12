@@ -117,6 +117,10 @@ include bsdiff/Makefile-bsdiff.am.inc
 EXTRA_DIST += bsdiff/Makefile-bsdiff.am
 noinst_LTLIBRARIES += libbsdiff.la
 
+if USE_HDIFFPATCH
+include Makefile-hdiffpatch.am
+endif
+
 LCFS_DEP_CRYPTO_CFLAGS=$(OT_DEP_CRYPTO_CFLAGS)
 LCFS_DEP_CRYPTO_LIBS=$(OT_DEP_CRYPTO_LIBS)
 

@@ -18,6 +18,7 @@ AC_SYS_LARGEFILE
 
 AC_PROG_CC
 AM_PROG_CC_C_O
+AC_PROG_CXX
 AC_PROG_YACC
 
 dnl Versioning information
@@ -162,6 +163,23 @@ AS_IF([test x$with_zstd = xyes], [
   OSTREE_FEATURES="$OSTREE_FEATURES zstd"
 ])
 AM_CONDITIONAL([USE_ZSTD], [test x$with_zstd = xyes])
+
+dnl Optional: HDiffPatch (bundled as a git submodule) for hdiff-based static deltas
+AC_ARG_WITH([hdiffpatch],
+  [AS_HELP_STRING([--with-hdiffpatch], [Enable hdiff-based static deltas using the bundled HDiffPatch @<:@default=auto@:>@])],
+  [], [with_hdiffpatch=auto])
+AS_IF([test x$with_hdiffpatch != xno], [
+  AS_IF([test -f "$srcdir/hdiffpatch/libHDiffPatch/HDiff/diff.h" && test "x$CXX" != x && test "x$CXX" != xno],
+    [have_hdiffpatch=yes], [have_hdiffpatch=no])
+  AS_IF([test x$have_hdiffpatch = xno && test x$with_hdiffpatch = xyes],
+    [AC_MSG_ERROR([--with-hdiffpatch was given, but the hdiffpatch submodule or a C++ compiler is missing])])
+  with_hdiffpatch=$have_hdiffpatch
+])
+AS_IF([test x$with_hdiffpatch = xyes], [
+  AC_DEFINE([HAVE_HDIFFPATCH], 1, [Define if we have HDiffPatch])
+  OSTREE_FEATURES="$OSTREE_FEATURES hdiffpatch"
+])
+AM_CONDITIONAL([USE_HDIFFPATCH], [test x$with_hdiffpatch = xyes])
 
 dnl We're not actually linking to this, just using the header
 PKG_CHECK_MODULES(OT_DEP_E2P, e2p)
@@ -773,7 +791,8 @@ echo "
     libsodium (ed25519 signatures):               $with_ed25519_libsodium
     openssl (ed25519 and spki signatures):        $with_openssl
     libarchive (parse tar files directly):        $with_libarchive
-    zstd (archive-zstd repositories):             $with_zstd
+    zstd (archive-zstd repositories, deltas):     $with_zstd
+    hdiffpatch (hdiff static deltas):             $with_hdiffpatch
     static deltas:                                yes (always enabled now)
     O_TMPFILE:                                    $enable_otmpfile
     wrpseudo-compat:                              $enable_wrpseudo_compat

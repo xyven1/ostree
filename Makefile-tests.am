@@ -431,6 +431,15 @@ tests_test_zstd_CFLAGS = $(TESTS_CFLAGS) $(OT_DEP_ZSTD_CFLAGS)
 tests_test_zstd_LDADD = $(TESTS_LDADD) $(OT_DEP_ZSTD_LIBS)
 endif
 
+if USE_HDIFFPATCH
+_installed_or_uninstalled_test_programs += tests/test-hdiff
+tests_test_hdiff_SOURCES = tests/test-hdiff.c
+# See the note on nodist_EXTRA_libostree_1_la_SOURCES
+nodist_EXTRA_tests_test_hdiff_SOURCES = tests/test-dummy-cxx-link.cxx
+tests_test_hdiff_CFLAGS = $(TESTS_CFLAGS)
+tests_test_hdiff_LDADD = libhdiffpatch.la $(TESTS_LDADD)
+endif
+
 tests_test_rfc2616_dates_SOURCES = \
 	src/libostree/ostree-date-utils.c \
 	tests/test-rfc2616-dates.c
