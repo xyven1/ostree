@@ -7,3 +7,4 @@
 [submodule "hdiffpatch"]
 	path = hdiffpatch
 	url = https://github.com/sisong/HDiffPatch
+	ignore = untracked

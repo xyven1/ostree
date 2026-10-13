@@ -62,13 +62,12 @@ compress_none (OtDeltaReadFunc read, gpointer read_data, OtDeltaWriteFunc write,
 
 static gboolean
 compress_xz (const OtDeltaCompressOptions *options, OtDeltaReadFunc read, gpointer read_data,
-             OtDeltaWriteFunc write, gpointer write_data, GCancellable *cancellable,
-             GError **error)
+             OtDeltaWriteFunc write, gpointer write_data, GCancellable *cancellable, GError **error)
 {
   lzma_stream strm = LZMA_STREAM_INIT;
   lzma_options_lzma lzma_opts;
-  const uint32_t preset = (uint32_t)CLAMP (options->level, 0, 9)
-                          | (options->extreme ? LZMA_PRESET_EXTREME : 0);
+  const uint32_t preset
+      = (uint32_t)CLAMP (options->level, 0, 9) | (options->extreme ? LZMA_PRESET_EXTREME : 0);
   if (lzma_lzma_preset (&lzma_opts, preset))
     return glnx_throw (error, "Invalid xz preset %d", options->level);
   if (options->window_log > 0)
@@ -317,8 +316,7 @@ _ostree_delta_decompressor_read (OtDeltaDecompressor *self, guint8 *buf, gsize l
           self->lzma.avail_in = self->len - self->pos;
           self->lzma.next_out = buf + done;
           self->lzma.avail_out = len - done;
-          lzma_ret r
-              = lzma_code (&self->lzma, self->lzma.avail_in == 0 ? LZMA_FINISH : LZMA_RUN);
+          lzma_ret r = lzma_code (&self->lzma, self->lzma.avail_in == 0 ? LZMA_FINISH : LZMA_RUN);
           self->pos = self->len - self->lzma.avail_in;
           done = len - self->lzma.avail_out;
           if (r == LZMA_STREAM_END)

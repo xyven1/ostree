@@ -46,9 +46,9 @@ input_read (const hpatch_TStreamInput *stream, hpatch_StreamPos_t pos, unsigned 
   const OtHdiffInput *in = static_cast<const OtHdiffInput *> (stream->streamImport);
   if (out == out_end)
     return hpatch_TRUE;
-  if (pos > in->size || (hpatch_StreamPos_t) (out_end - out) > in->size - pos)
+  if (pos > in->size || (hpatch_StreamPos_t)(out_end - out) > in->size - pos)
     return hpatch_FALSE;
-  return in->read (in->user_data, pos, out, (gsize) (out_end - out)) ? hpatch_TRUE : hpatch_FALSE;
+  return in->read (in->user_data, pos, out, (gsize)(out_end - out)) ? hpatch_TRUE : hpatch_FALSE;
 }
 
 void
@@ -75,7 +75,7 @@ fd_write (const hpatch_TStreamOutput *stream, hpatch_StreamPos_t pos, const unsi
   FdOutput *out = static_cast<FdOutput *> (stream->streamImport);
   while (data < data_end)
     {
-      ssize_t n = pwrite (out->fd, data, (size_t) (data_end - data), (off_t)pos);
+      ssize_t n = pwrite (out->fd, data, (size_t)(data_end - data), (off_t)pos);
       if (n < 0)
         {
           if (errno == EINTR)
@@ -107,9 +107,9 @@ seq_write (const hpatch_TStreamOutput *stream, hpatch_StreamPos_t pos, const uns
     return hpatch_FALSE;
   if (data == data_end)
     return hpatch_TRUE;
-  if (!out->write (out->user_data, data, (gsize) (data_end - data)))
+  if (!out->write (out->user_data, data, (gsize)(data_end - data)))
     return hpatch_FALSE;
-  out->pos += (guint64) (data_end - data);
+  out->pos += (guint64)(data_end - data);
   return hpatch_TRUE;
 }
 
@@ -209,8 +209,7 @@ _ostree_hdiff_create_block (const OtHdiffInput *old_in, const OtHdiffInput *new_
     }
   catch (const std::exception &e)
     {
-      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED, "hdiff generation failed: %s",
-                   e.what ());
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED, "hdiff generation failed: %s", e.what ());
       return FALSE;
     }
   return TRUE;

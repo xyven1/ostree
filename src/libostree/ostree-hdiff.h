@@ -56,10 +56,7 @@ typedef struct
   guint threads;
 } OtHdiffMemOptions;
 
-#define OT_HDIFF_MEM_OPTIONS_DEFAULT \
-  { \
-    1024, 6, FALSE, 1 \
-  }
+#define OT_HDIFF_MEM_OPTIONS_DEFAULT { 1024, 6, FALSE, 1 }
 
 /* Precise differ: loads what it needs of both inputs into memory (in the
  * worst case all of both, plus working space of several times the old size).

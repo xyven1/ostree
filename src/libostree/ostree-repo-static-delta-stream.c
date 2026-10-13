@@ -67,9 +67,9 @@ typedef struct
 {
   guint64 offset;
   guint64 size;
-  GBytes *mem;                               /* in-memory segment, or... */
+  GBytes *mem;                                 /* in-memory segment, or... */
   char checksum[OSTREE_SHA256_STRING_LEN + 1]; /* ...a bare content object, or... */
-  int ext_fd;                                /* ...a range of a file we don't own */
+  int ext_fd;                                  /* ...a range of a file we don't own */
   guint64 ext_offset;
 } ConcatSegment;
 
@@ -543,8 +543,8 @@ static void
 variant_table_init (VariantTable *self)
 {
   self->values = g_ptr_array_new_with_free_func ((GDestroyNotify)g_variant_unref);
-  self->index = g_hash_table_new_full (g_bytes_hash, g_bytes_equal,
-                                       (GDestroyNotify)g_bytes_unref, NULL);
+  self->index
+      = g_hash_table_new_full (g_bytes_hash, g_bytes_equal, (GDestroyNotify)g_bytes_unref, NULL);
 }
 
 static void
@@ -713,10 +713,9 @@ maybe_swap_u64 (gboolean swap, guint64 v)
  * @precise selects the in-memory differ.
  */
 static gboolean
-generator_emit_part (StreamGenerator *self, const char *name, guint part_index,
-                     GArray *new_objects, GArray *old_objects, gboolean precise,
-                     VariantTable *modes, VariantTable *xattrs, GCancellable *cancellable,
-                     GError **error)
+generator_emit_part (StreamGenerator *self, const char *name, guint part_index, GArray *new_objects,
+                     GArray *old_objects, gboolean precise, VariantTable *modes,
+                     VariantTable *xattrs, GCancellable *cancellable, GError **error)
 {
   OstreeStaticDeltaStreamPart *part = self->out_parts->pdata[part_index];
 
@@ -833,16 +832,15 @@ generator_emit_part (StreamGenerator *self, const char *name, guint part_index,
 
   g_autoptr (GVariant) header = g_variant_ref_sink (g_variant_new (
       "(yytt@ay@a(uuu)@aa(ayay)@a(uut))", copts.type,
-      (guint8) (use_diff ? OSTREE_STATIC_DELTA_STREAM_KIND_HDIFF
-                         : OSTREE_STATIC_DELTA_STREAM_KIND_RAW),
+      (guint8)(use_diff ? OSTREE_STATIC_DELTA_STREAM_KIND_HDIFF
+                        : OSTREE_STATIC_DELTA_STREAM_KIND_RAW),
       GUINT64_TO_LE (new_concat->size), GUINT64_TO_LE (data_size),
       ot_gvariant_new_bytearray (sources->data, sources->len),
       g_variant_builder_end (&modes_builder), g_variant_builder_end (&xattrs_builder),
       g_variant_builder_end (&entries_builder)));
 
   /* Write the part */
-  if (!glnx_open_tmpfile_linkable_at (self->parts_dfd, ".", O_RDWR | O_CLOEXEC, &part->tmpf,
-                                      error))
+  if (!glnx_open_tmpfile_linkable_at (self->parts_dfd, ".", O_RDWR | O_CLOEXEC, &part->tmpf, error))
     return FALSE;
 
   g_autoptr (GChecksum) checksum = g_checksum_new (G_CHECKSUM_SHA256);
@@ -909,15 +907,14 @@ generator_emit_part (StreamGenerator *self, const char *name, guint part_index,
       ot_gvariant_new_bytearray (object_names->data, object_names->len)));
 
   if (self->options->verbose)
-    g_printerr ("stream part %u (%s): objects=%u sources=%u new=%" G_GUINT64_FORMAT
-                " old=%" G_GUINT64_FORMAT " %s=%" G_GUINT64_FORMAT " compressed=%" G_GUINT64_FORMAT
-                " (%s) in %.2fs\n",
-                part_index + 1, name, new_objects->len, use_diff ? old_objects->len : 0,
-                new_concat->size, old_concat->size,
-                !use_diff ? "raw" : (mem_diff ? "diff" : "blockdiff"), data_size,
-                part->compressed_size,
-                copts.type == OSTREE_STATIC_DELTA_COMPRESSION_ZSTD ? "zstd" : "xz",
-                (g_get_monotonic_time () - start_time) / (double)G_USEC_PER_SEC);
+    g_printerr (
+        "stream part %u (%s): objects=%u sources=%u new=%" G_GUINT64_FORMAT
+        " old=%" G_GUINT64_FORMAT " %s=%" G_GUINT64_FORMAT " compressed=%" G_GUINT64_FORMAT
+        " (%s) in %.2fs\n",
+        part_index + 1, name, new_objects->len, use_diff ? old_objects->len : 0, new_concat->size,
+        old_concat->size, !use_diff ? "raw" : (mem_diff ? "diff" : "blockdiff"), data_size,
+        part->compressed_size, copts.type == OSTREE_STATIC_DELTA_COMPRESSION_ZSTD ? "zstd" : "xz",
+        (g_get_monotonic_time () - start_time) / (double)G_USEC_PER_SEC);
 
   return TRUE;
 }
@@ -930,8 +927,7 @@ generator_load_new_file (StreamGenerator *self, const char *checksum, const char
 {
   g_autoptr (GFileInfo) finfo = NULL;
   g_autoptr (GVariant) file_xattrs = NULL;
-  if (!ostree_repo_load_file (self->repo, checksum, NULL, &finfo, &file_xattrs, cancellable,
-                              error))
+  if (!ostree_repo_load_file (self->repo, checksum, NULL, &finfo, &file_xattrs, cancellable, error))
     return FALSE;
 
   out->objtype = OSTREE_OBJECT_TYPE_FILE;
@@ -1022,10 +1018,9 @@ static gpointer
 emit_job_thread (gpointer data)
 {
   EmitJob *job = data;
-  return GINT_TO_POINTER (generator_emit_part (job->gen, job->name, job->part_index,
-                                               job->new_objects, job->old_objects, job->precise,
-                                               job->modes, job->xattrs, job->cancellable,
-                                               &job->error));
+  return GINT_TO_POINTER (
+      generator_emit_part (job->gen, job->name, job->part_index, job->new_objects, job->old_objects,
+                           job->precise, job->modes, job->xattrs, job->cancellable, &job->error));
 }
 
 void
@@ -1116,8 +1111,9 @@ _ostree_static_delta_stream_generate (OstreeRepo *repo, const char *from, const 
     GHashTable *to;
     GHashTable *from;
     OstreeObjectType objtype;
-  } meta_kinds[] = { { to_contents.dirtrees, from_contents.dirtrees, OSTREE_OBJECT_TYPE_DIR_TREE },
-                     { to_contents.dirmetas, from_contents.dirmetas, OSTREE_OBJECT_TYPE_DIR_META } };
+  } meta_kinds[]
+      = { { to_contents.dirtrees, from_contents.dirtrees, OSTREE_OBJECT_TYPE_DIR_TREE },
+          { to_contents.dirmetas, from_contents.dirmetas, OSTREE_OBJECT_TYPE_DIR_META } };
   for (guint k = 0; k < G_N_ELEMENTS (meta_kinds); k++)
     {
       g_hash_table_iter_init (&iter, meta_kinds[k].to);
@@ -1225,10 +1221,10 @@ _ostree_static_delta_stream_generate (OstreeRepo *repo, const char *from, const 
     /* If the groups were merged above, the first part is mostly new content,
      * which the precise differ is slow and no better at.
      */
-    EmitJob jobs[2] = { { &gen, merged ? "all" : "modified", 0, mod_new, mod_old, !merged, &modes,
-                          &xattrs, cancellable, NULL },
-                        { &gen, "new", 0, add_new, add_old, FALSE, &modes, &xattrs, cancellable,
-                          NULL } };
+    EmitJob jobs[2]
+        = { { &gen, merged ? "all" : "modified", 0, mod_new, mod_old, !merged, &modes, &xattrs,
+              cancellable, NULL },
+            { &gen, "new", 0, add_new, add_old, FALSE, &modes, &xattrs, cancellable, NULL } };
     guint n_jobs = 0;
     for (guint j = 0; j < G_N_ELEMENTS (jobs); j++)
       {
@@ -1318,8 +1314,8 @@ stream_part_parse (GVariant *part, StreamPart *out, GError **error)
 
   g_autoptr (GBytes) header_bytes = NULL;
   {
-    g_autoptr (OtDeltaDecompressor) decompressor = _ostree_delta_decompressor_new (
-        header_compression, data + prefix_len, header_len, error);
+    g_autoptr (OtDeltaDecompressor) decompressor
+        = _ostree_delta_decompressor_new (header_compression, data + prefix_len, header_len, error);
     if (!decompressor)
       return FALSE;
     g_autoptr (GByteArray) buf = g_byte_array_new ();
@@ -1368,10 +1364,10 @@ _ostree_static_delta_stream_part_describe (GVariant *part, char **out_descriptio
   };
   if (!stream_part_parse (part, &parsed, error))
     return FALSE;
-  const char *comp = parsed.compression == OSTREE_STATIC_DELTA_COMPRESSION_ZSTD
-                         ? "zstd"
-                         : (parsed.compression == OSTREE_STATIC_DELTA_COMPRESSION_XZ ? "xz"
-                                                                                    : "none");
+  const char *comp
+      = parsed.compression == OSTREE_STATIC_DELTA_COMPRESSION_ZSTD
+            ? "zstd"
+            : (parsed.compression == OSTREE_STATIC_DELTA_COMPRESSION_XZ ? "xz" : "none");
   *out_description = g_strdup_printf (
       "stream kind=%s compression=%s objects=%" G_GSIZE_FORMAT " sources=%" G_GSIZE_FORMAT
       " newsize=%" G_GUINT64_FORMAT " datasize=%" G_GUINT64_FORMAT
@@ -1444,8 +1440,7 @@ stream_sink_begin_object (StreamSink *self, GError **error)
     {
       if (self->objtype != OSTREE_OBJECT_TYPE_DIR_TREE
           && self->objtype != OSTREE_OBJECT_TYPE_DIR_META)
-        return glnx_throw (error, "Unexpected object type %u in stream delta part",
-                           self->objtype);
+        return glnx_throw (error, "Unexpected object type %u in stream delta part", self->objtype);
       if (self->size > OSTREE_MAX_METADATA_SIZE)
         return glnx_throw (error, "Metadata object %s is too large", self->checksum);
       if (!self->have_obj)
@@ -1457,8 +1452,7 @@ stream_sink_begin_object (StreamSink *self, GError **error)
     return glnx_throw (error, "Stream delta mode index %u out of range", mode_index);
   if (xattr_index >= g_variant_n_children (self->part->xattrs))
     return glnx_throw (error, "Stream delta xattr index %u out of range", xattr_index);
-  g_variant_get_child (self->part->modes, mode_index, "(uuu)", &self->uid, &self->gid,
-                       &self->mode);
+  g_variant_get_child (self->part->modes, mode_index, "(uuu)", &self->uid, &self->gid, &self->mode);
   self->uid = GUINT32_FROM_BE (self->uid);
   self->gid = GUINT32_FROM_BE (self->gid);
   self->mode = GUINT32_FROM_BE (self->mode);
@@ -1493,8 +1487,8 @@ stream_sink_finish_object (StreamSink *self, GError **error)
   else if (OSTREE_OBJECT_TYPE_IS_META (self->objtype))
     {
       g_autoptr (GBytes) bytes = g_byte_array_free_to_bytes (g_steal_pointer (&self->buffer));
-      g_autoptr (GVariant) metadata = g_variant_ref_sink (g_variant_new_from_bytes (
-          ostree_metadata_variant_type (self->objtype), bytes, FALSE));
+      g_autoptr (GVariant) metadata = g_variant_ref_sink (
+          g_variant_new_from_bytes (ostree_metadata_variant_type (self->objtype), bytes, FALSE));
       g_autofree guchar *actual_csum = NULL;
       if (!ostree_repo_write_metadata (self->repo, self->objtype, self->checksum, metadata,
                                        &actual_csum, self->cancellable, error))
@@ -1634,8 +1628,8 @@ _ostree_static_delta_stream_part_execute (OstreeRepo *repo, GVariant *objects, G
   if (!_ostree_static_delta_parse_checksum_array (objects, &object_names, &n_objects, error))
     return FALSE;
   if (g_variant_n_children (parsed.entries) != n_objects)
-    return glnx_throw (error, "Stream delta part describes %" G_GSIZE_FORMAT
-                              " objects, expected %u",
+    return glnx_throw (error,
+                       "Stream delta part describes %" G_GSIZE_FORMAT " objects, expected %u",
                        g_variant_n_children (parsed.entries), n_objects);
   {
     guint64 total = 0;
@@ -1679,8 +1673,8 @@ _ostree_static_delta_stream_part_execute (OstreeRepo *repo, GVariant *objects, G
       while (remaining > 0)
         {
           gsize n;
-          if (!_ostree_delta_decompressor_read (decompressor, buf, MIN (remaining, IO_BUF_SIZE),
-                                                &n, error))
+          if (!_ostree_delta_decompressor_read (decompressor, buf, MIN (remaining, IO_BUF_SIZE), &n,
+                                                error))
             return FALSE;
           if (n == 0)
             return glnx_throw (error, "Truncated stream delta part");
@@ -1728,8 +1722,8 @@ _ostree_static_delta_stream_part_execute (OstreeRepo *repo, GVariant *objects, G
       const OtHdiffInput old_in = concat_as_input (old_concat);
       const OtHdiffInput diff_in = { parsed.data_size, diff_reader_read, &reader };
       g_autoptr (GError) patch_error = NULL;
-      if (!_ostree_hdiff_patch_stream (&old_in, &diff_in, parsed.new_size, stream_sink_write,
-                                       &sink, &patch_error))
+      if (!_ostree_hdiff_patch_stream (&old_in, &diff_in, parsed.new_size, stream_sink_write, &sink,
+                                       &patch_error))
         {
           /* Prefer the error that made the patcher fail */
           g_autoptr (GError) reader_error = reader.error;
