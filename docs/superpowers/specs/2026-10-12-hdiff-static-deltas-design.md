@@ -58,6 +58,8 @@ Two things were asked for:
   - **modified**: new metadata, plus new files whose basename matches a file gone from the target;
     diffed precisely against the gone metadata and files.
   - **new**: every other new file; block-matched against old files sharing a basename.
+  - Basenames compare equal when they differ only in digits, so a library with its version in
+    its file name is paired with its previous version.
 - From-empty: one part, the compressed stream, no differ involved.
 - The superblock is unchanged, so inline parts, signing, `pull` and `apply-offline` work as before.
   A bulk part is recognised by a leading `b` where other parts have their compression byte. The

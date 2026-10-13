@@ -244,14 +244,19 @@ Diffing whole groups of objects at once has three effects:
 A bulk delta has at most two parts, generated concurrently:
 
  - The *modified* part holds the new metadata objects and the new
-   files whose basename matches a file that is gone from the target
+   files whose name matches a file that is gone from the target
    commit.  It is diffed against the metadata and files that are gone,
    using HDiffPatch's precise in-memory differ.  For an ordinary
    update this part is the entire delta.
  - The *new* part holds all other new files, diffed against old files
-   sharing a basename with HDiffPatch's low-memory block-matching
+   sharing a name with HDiffPatch's low-memory block-matching
    differ.  This is mostly content with nothing to diff against, so
    its cost is compression.
+
+Names are compared by basename with runs of digits treated as equal,
+so `libfoo.so.1.2.3` matches `libfoo.so.1.3.0`: a library whose
+version is part of its file name still gets the precise differ when
+it is upgraded.
 
 For a `from NULL` delta there is nothing to diff, and a single part
 simply holds the compressed stream.

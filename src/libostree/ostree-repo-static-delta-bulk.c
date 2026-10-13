@@ -533,6 +533,23 @@ path_basename (const char *path)
   return slash ? slash + 1 : path;
 }
 
+/* The name files are grouped by: the basename with every run of digits collapsed, so that
+ * libfoo.so.1.2.3 and libfoo.so.1.3.0 count as the same file.  Owned by @chunk.
+ */
+static const char *
+route_name (GStringChunk *chunk, const char *path)
+{
+  g_autoptr (GString) s = g_string_new (NULL);
+  for (const char *p = path_basename (path); *p; p++)
+    {
+      if (!g_ascii_isdigit (*p))
+        g_string_append_c (s, *p);
+      else if (s->len == 0 || s->str[s->len - 1] != '0')
+        g_string_append_c (s, '0');
+    }
+  return g_string_chunk_insert_const (chunk, s->str);
+}
+
 typedef struct
 {
   GPtrArray *values; /* GVariant */
@@ -1377,9 +1394,11 @@ _ostree_static_delta_bulk_generate (OstreeRepo *repo, const char *from, const ch
   g_autoptr (GArray) add_new = stream_object_array_new ();
   g_autoptr (GArray) add_old = stream_object_array_new ();
 
-  /* Basenames of regular files that are gone in the target */
+  g_autoptr (GStringChunk) names = g_string_chunk_new (4096);
+
+  /* Names (see route_name()) of regular files that are gone in the target */
   g_autoptr (GHashTable) gone_basenames = g_hash_table_new (g_str_hash, g_str_equal);
-  /* Basenames of the new regular files in each part */
+  /* Names of the new regular files in each part */
   g_autoptr (GHashTable) mod_basenames = g_hash_table_new (g_str_hash, g_str_equal);
   g_autoptr (GHashTable) add_basenames = g_hash_table_new (g_str_hash, g_str_equal);
   GHashTableIter iter;
@@ -1387,7 +1406,7 @@ _ostree_static_delta_bulk_generate (OstreeRepo *repo, const char *from, const ch
   g_hash_table_iter_init (&iter, from_contents.files);
   while (g_hash_table_iter_next (&iter, &key, &value))
     if (!g_hash_table_contains (to_contents.files, key))
-      g_hash_table_add (gone_basenames, (char *)path_basename (value));
+      g_hash_table_add (gone_basenames, (char *)route_name (names, value));
 
   /* New metadata.  The commit object itself travels in the superblock. */
   struct
@@ -1437,7 +1456,7 @@ _ostree_static_delta_bulk_generate (OstreeRepo *repo, const char *from, const ch
       };
       if (!generator_load_new_file (&gen, key, value, &modes, &xattrs, &obj, cancellable, error))
         goto out;
-      const char *basename = path_basename (value);
+      const char *basename = route_name (names, value);
       /* Symlinks are tiny; keep them with the metadata */
       if (obj.mem != NULL || g_hash_table_contains (gone_basenames, basename))
         {
@@ -1456,7 +1475,7 @@ _ostree_static_delta_bulk_generate (OstreeRepo *repo, const char *from, const ch
   g_hash_table_iter_init (&iter, from_contents.files);
   while (g_hash_table_iter_next (&iter, &key, &value))
     {
-      const char *basename = path_basename (value);
+      const char *basename = route_name (names, value);
       const gboolean gone = !g_hash_table_contains (to_contents.files, key);
       GArray *target = NULL;
       if (gone && g_hash_table_contains (mod_basenames, basename))

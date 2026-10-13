@@ -26,7 +26,7 @@ skip_without_user_xattrs
 skip_without_ostree_feature hdiffpatch
 skip_without_ostree_feature zstd
 
-echo '1..16'
+echo '1..17'
 
 # Deterministic pseudo-random data: compressible, but not trivially so
 gen_data() {
@@ -344,6 +344,32 @@ for effort in 0 3 5; do
     done
 done
 echo "ok bulk delta with pipelined part compression"
+
+# A file whose name changes only in its version number is still treated as a
+# new version of the old file, and goes to the "modified" part along with the
+# metadata; an unrelated new file does not.
+mkdir -p verfiles/lib
+head -c 200000 /dev/urandom > verfiles/lib/libver.so.1.2.3
+${CMD_PREFIX} ostree --repo=repo commit -b ver -s v1 --tree=dir=verfiles
+mv verfiles/lib/libver.so.1.2.3 verfiles/lib/libver.so.1.10.0
+echo changed >> verfiles/lib/libver.so.1.10.0
+head -c 300000 /dev/urandom > verfiles/lib/unrelated
+${CMD_PREFIX} ostree --repo=repo commit -b ver -s v2 --tree=dir=verfiles
+verfrom=$(${CMD_PREFIX} ostree --repo=repo rev-parse ver^)
+verto=$(${CMD_PREFIX} ostree --repo=repo rev-parse ver)
+${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${verfrom} --to=${verto} --inline \
+              --filename=deltas/ver --bulk 2>&1 | tee out.txt
+assert_file_has_content out.txt 'bulk part 1 (modified): objects=[0-9]* sources=[0-9]* new=2[0-9][0-9][0-9][0-9][0-9] '
+assert_file_has_content out.txt 'bulk part 2 (new): objects=1 '
+rm -rf target
+${CMD_PREFIX} ostree --repo=target init --mode=bare-user
+${CMD_PREFIX} ostree --repo=target pull-local repo ${verfrom}
+${CMD_PREFIX} ostree --repo=target static-delta apply-offline deltas/ver
+${CMD_PREFIX} ostree --repo=target fsck
+${CMD_PREFIX} ostree --repo=repo ls -R -C ${verto} > expected-ver-ls.txt
+${CMD_PREFIX} ostree --repo=target ls -R -C ${verto} > actual-ver-ls.txt
+assert_files_equal expected-ver-ls.txt actual-ver-ls.txt
+echo "ok bulk delta pairs files renamed by version"
 
 # Option validation
 if ${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} \
