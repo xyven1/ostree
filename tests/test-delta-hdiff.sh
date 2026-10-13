@@ -26,7 +26,7 @@ skip_without_user_xattrs
 skip_without_ostree_feature hdiffpatch
 skip_without_ostree_feature zstd
 
-echo '1..15'
+echo '1..16'
 
 # Deterministic pseudo-random data: compressible, but not trivially so
 gen_data() {
@@ -320,6 +320,30 @@ ${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${
               --min-fallback-size=0 --inline --filename=deltas/private-bsdiff --allow-private-sources
 apply_and_check deltas/private-bsdiff
 echo "ok private delta sources"
+
+# Parts larger than a few megabytes are read, compressed and written by
+# separate threads when more than one is allowed; the result must apply the
+# same.  This needs more data than the tree above has.
+mkdir -p bigfiles/sub
+head -c 7000000 /dev/urandom > bigfiles/random
+gen_data 8 3000 > bigfiles/sub/compressible
+cp files/bin/tool bigfiles/sub/tool
+${CMD_PREFIX} ostree --repo=repo commit -b big -s big --tree=dir=bigfiles
+bigrev=$(${CMD_PREFIX} ostree --repo=repo rev-parse big)
+${CMD_PREFIX} ostree --repo=repo ls -R -C ${bigrev} > expected-big-ls.txt
+for effort in 0 3 5; do
+    for threads in 1 4; do
+        ${CMD_PREFIX} ostree --repo=repo static-delta generate --empty --to=${bigrev} --inline \
+                      --filename=deltas/big-${effort}-${threads} --bulk --effort=${effort} --threads=${threads}
+        rm -rf target
+        ${CMD_PREFIX} ostree --repo=target init --mode=bare-user
+        ${CMD_PREFIX} ostree --repo=target static-delta apply-offline deltas/big-${effort}-${threads}
+        ${CMD_PREFIX} ostree --repo=target fsck
+        ${CMD_PREFIX} ostree --repo=target ls -R -C ${bigrev} > actual-big-ls.txt
+        assert_files_equal expected-big-ls.txt actual-big-ls.txt
+    done
+done
+echo "ok bulk delta with pipelined part compression"
 
 # Option validation
 if ${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} \

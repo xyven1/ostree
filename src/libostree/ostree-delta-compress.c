@@ -169,6 +169,15 @@ compress_zstd (const OtDeltaCompressOptions *options, OtDeltaReadFunc read, gpoi
       if (wlog >= 25)
         (void)ZSTD_CCtx_setParameter (cctx, ZSTD_c_enableLongDistanceMatching, 1);
     }
+  if (options->src_size_known)
+    {
+      zr = ZSTD_CCtx_setPledgedSrcSize (cctx, options->src_size);
+      if (ZSTD_isError (zr))
+        {
+          glnx_throw (error, "zstd: %s", ZSTD_getErrorName (zr));
+          goto out;
+        }
+    }
   /* Fails harmlessly if libzstd was built without threading */
   if (options->threads > 1)
     (void)ZSTD_CCtx_setParameter (cctx, ZSTD_c_nbWorkers, (int)options->threads);

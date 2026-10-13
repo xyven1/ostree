@@ -587,6 +587,265 @@ part_writer_write (gpointer user_data, const guint8 *buf, gsize len, GError **er
   return TRUE;
 }
 
+/* ------------------------------------------------------------------------ */
+/* Pipeline stages                                                           */
+/* ------------------------------------------------------------------------ */
+
+/* Compressing a large part is a pipeline: read the objects, compress, then
+ * write and checksum the result.  The compressors only parallelise the
+ * middle stage, and at low efforts the two ends cost more than it does.  The
+ * helpers below move each end onto a thread of its own.  The bytes produced
+ * are the same.
+ */
+#define PIPE_DEPTH 8
+#define SOURCE_CHUNK_SIZE (4 * 1024 * 1024)
+#define SINK_CHUNK_SIZE (1024 * 1024)
+
+/* A bounded queue of buffers handed from one thread to another */
+typedef struct
+{
+  GMutex lock;
+  GCond cond;
+  GQueue queue;     /* GBytes */
+  gboolean closed;  /* the producer has finished */
+  gboolean aborted; /* either side has given up */
+} Pipe;
+
+static void
+pipe_init (Pipe *self)
+{
+  g_mutex_init (&self->lock);
+  g_cond_init (&self->cond);
+  g_queue_init (&self->queue);
+  self->closed = self->aborted = FALSE;
+}
+
+static void
+pipe_clear (Pipe *self)
+{
+  g_queue_clear_full (&self->queue, (GDestroyNotify)g_bytes_unref);
+  g_mutex_clear (&self->lock);
+  g_cond_clear (&self->cond);
+}
+
+/* Takes ownership of @bytes; FALSE if the other side has given up */
+static gboolean
+pipe_push (Pipe *self, GBytes *bytes)
+{
+  g_mutex_lock (&self->lock);
+  while (!self->aborted && g_queue_get_length (&self->queue) >= PIPE_DEPTH)
+    g_cond_wait (&self->cond, &self->lock);
+  const gboolean ok = !self->aborted;
+  if (ok)
+    g_queue_push_tail (&self->queue, bytes);
+  else
+    g_bytes_unref (bytes);
+  g_cond_broadcast (&self->cond);
+  g_mutex_unlock (&self->lock);
+  return ok;
+}
+
+/* The next buffer, or NULL once the producer has finished or either side gave up */
+static GBytes *
+pipe_pop (Pipe *self)
+{
+  g_mutex_lock (&self->lock);
+  while (!self->aborted && !self->closed && g_queue_is_empty (&self->queue))
+    g_cond_wait (&self->cond, &self->lock);
+  GBytes *ret = self->aborted ? NULL : g_queue_pop_head (&self->queue);
+  g_cond_broadcast (&self->cond);
+  g_mutex_unlock (&self->lock);
+  return ret;
+}
+
+static void
+pipe_finish (Pipe *self, gboolean abort)
+{
+  g_mutex_lock (&self->lock);
+  if (abort)
+    self->aborted = TRUE;
+  else
+    self->closed = TRUE;
+  g_cond_broadcast (&self->cond);
+  g_mutex_unlock (&self->lock);
+}
+
+/* Runs an OtDeltaReadFunc ahead of its consumer, on its own thread */
+typedef struct
+{
+  Pipe pipe;
+  GThread *thread;
+  OtDeltaReadFunc read;
+  gpointer read_data;
+  GBytes *current;
+  gsize pos;
+  GError *error; /* set by the thread before it aborts the pipe */
+} AsyncSource;
+
+static gpointer
+async_source_thread (gpointer data)
+{
+  AsyncSource *self = data;
+  while (TRUE)
+    {
+      guint8 *buf = g_malloc (SOURCE_CHUNK_SIZE);
+      gssize n = self->read (self->read_data, buf, SOURCE_CHUNK_SIZE, &self->error);
+      if (n <= 0)
+        {
+          g_free (buf);
+          pipe_finish (&self->pipe, n < 0);
+          break;
+        }
+      if (!pipe_push (&self->pipe, g_bytes_new_take (buf, n)))
+        break;
+    }
+  return NULL;
+}
+
+static void
+async_source_start (AsyncSource *self, OtDeltaReadFunc read, gpointer read_data)
+{
+  memset (self, 0, sizeof (*self));
+  pipe_init (&self->pipe);
+  self->read = read;
+  self->read_data = read_data;
+  self->thread = g_thread_new ("ostree-delta-read", async_source_thread, self);
+}
+
+static gssize
+async_source_read (gpointer user_data, guint8 *buf, gsize len, GError **error)
+{
+  AsyncSource *self = user_data;
+  if (self->current == NULL)
+    {
+      self->current = pipe_pop (&self->pipe);
+      self->pos = 0;
+      if (self->current == NULL)
+        {
+          /* End of input, or the reader failed: its error is final once the pipe aborted */
+          g_mutex_lock (&self->pipe.lock);
+          const gboolean failed = self->pipe.aborted;
+          g_mutex_unlock (&self->pipe.lock);
+          if (!failed)
+            return 0;
+          if (self->error != NULL)
+            g_propagate_error (error, g_error_copy (self->error));
+          else
+            glnx_throw (error, "Reading delta content failed");
+          return -1;
+        }
+    }
+  gsize size;
+  const guint8 *data = g_bytes_get_data (self->current, &size);
+  const gsize n = MIN (len, size - self->pos);
+  memcpy (buf, data + self->pos, n);
+  self->pos += n;
+  if (self->pos == size)
+    g_clear_pointer (&self->current, g_bytes_unref);
+  return n;
+}
+
+/* Must be called exactly once, whether or not everything was read */
+static void
+async_source_finish (AsyncSource *self)
+{
+  pipe_finish (&self->pipe, TRUE);
+  g_thread_join (self->thread);
+  g_clear_pointer (&self->current, g_bytes_unref);
+  g_clear_error (&self->error);
+  pipe_clear (&self->pipe);
+}
+
+/* Runs an OtDeltaWriteFunc behind its producer, on its own thread */
+typedef struct
+{
+  Pipe pipe;
+  GThread *thread;
+  OtDeltaWriteFunc write;
+  gpointer write_data;
+  GByteArray *pending;
+  GError *error; /* set by the thread before it aborts the pipe */
+} AsyncSink;
+
+static gpointer
+async_sink_thread (gpointer data)
+{
+  AsyncSink *self = data;
+  GBytes *bytes;
+  while ((bytes = pipe_pop (&self->pipe)) != NULL)
+    {
+      gsize size;
+      const guint8 *buf = g_bytes_get_data (bytes, &size);
+      const gboolean ok = self->write (self->write_data, buf, size, &self->error);
+      g_bytes_unref (bytes);
+      if (!ok)
+        {
+          pipe_finish (&self->pipe, TRUE);
+          break;
+        }
+    }
+  return NULL;
+}
+
+static void
+async_sink_start (AsyncSink *self, OtDeltaWriteFunc write, gpointer write_data)
+{
+  memset (self, 0, sizeof (*self));
+  pipe_init (&self->pipe);
+  self->write = write;
+  self->write_data = write_data;
+  self->pending = g_byte_array_sized_new (SINK_CHUNK_SIZE);
+  self->thread = g_thread_new ("ostree-delta-write", async_sink_thread, self);
+}
+
+static gboolean
+async_sink_flush (AsyncSink *self, GError **error)
+{
+  if (self->pending->len == 0)
+    return TRUE;
+  GBytes *bytes = g_byte_array_free_to_bytes (self->pending);
+  self->pending = g_byte_array_sized_new (SINK_CHUNK_SIZE);
+  if (!pipe_push (&self->pipe, bytes))
+    return glnx_throw (error,
+                       "Writing delta part failed"); /* replaced by the real error at finish */
+  return TRUE;
+}
+
+static gboolean
+async_sink_write (gpointer user_data, const guint8 *buf, gsize len, GError **error)
+{
+  AsyncSink *self = user_data;
+  g_byte_array_append (self->pending, buf, len);
+  if (self->pending->len >= SINK_CHUNK_SIZE)
+    return async_sink_flush (self, error);
+  return TRUE;
+}
+
+/* Must be called exactly once.  @ok is whether the producer succeeded; returns
+ * whether everything was written, preferring the writer's own error.
+ */
+static gboolean
+async_sink_finish (AsyncSink *self, gboolean ok, GError **error)
+{
+  g_autoptr (GError) flush_error = NULL;
+  if (ok && !async_sink_flush (self, &flush_error))
+    ok = FALSE;
+  pipe_finish (&self->pipe, !ok);
+  g_thread_join (self->thread);
+  g_byte_array_unref (self->pending);
+  pipe_clear (&self->pipe);
+  if (self->error != NULL)
+    {
+      if (error != NULL)
+        g_clear_error (error);
+      g_propagate_error (error, g_steal_pointer (&self->error));
+      return FALSE;
+    }
+  if (flush_error != NULL && error != NULL && *error == NULL)
+    g_propagate_error (error, g_steal_pointer (&flush_error));
+  return ok;
+}
+
 static gboolean
 bytearray_writer_write (gpointer user_data, const guint8 *buf, gsize len, GError **error)
 {
@@ -853,6 +1112,8 @@ generator_emit_part (BulkGenerator *self, const char *name, guint part_index, GA
     };
     hopts.type = self->effort->compression;
     hopts.level = hopts.type == OSTREE_STATIC_DELTA_COMPRESSION_ZSTD ? 19 : 9;
+    hopts.src_size_known = TRUE;
+    hopts.src_size = g_variant_get_size (header);
     g_autoptr (GByteArray) stored = g_byte_array_new ();
     MemReader reader = { g_variant_get_data (header), g_variant_get_size (header), 0 };
     if (!_ostree_delta_compress (&hopts, mem_reader_read, &reader, bytearray_writer_write, stored,
@@ -867,27 +1128,56 @@ generator_emit_part (BulkGenerator *self, const char *name, guint part_index, GA
       return FALSE;
   }
 
+  copts.src_size_known = TRUE;
+  copts.src_size = data_size;
+
+  /* With threads to spare and enough data to matter, write and checksum the
+   * output behind the compressor, and read objects ahead of it; see the
+   * pipeline helpers.  A single-threaded run stays on one thread.
+   */
+  const gboolean pipelined = self->threads > 1 && data_size > SMALL_DIFF_BYTES;
+  AsyncSink sink;
+  OtDeltaWriteFunc out_write = part_writer_write;
+  gpointer out_data = &writer;
+  if (pipelined)
+    {
+      async_sink_start (&sink, part_writer_write, &writer);
+      out_write = async_sink_write;
+      out_data = &sink;
+    }
+
   gboolean ok;
   if (!use_diff)
     {
       ConcatCursor cursor = { new_concat, 0 };
-      ok = _ostree_delta_compress (&copts, concat_cursor_read, &cursor, part_writer_write, &writer,
-                                   cancellable, error);
+      if (pipelined)
+        {
+          AsyncSource source;
+          async_source_start (&source, concat_cursor_read, &cursor);
+          ok = _ostree_delta_compress (&copts, async_source_read, &source, out_write, out_data,
+                                       cancellable, error);
+          async_source_finish (&source);
+        }
+      else
+        ok = _ostree_delta_compress (&copts, concat_cursor_read, &cursor, out_write, out_data,
+                                     cancellable, error);
     }
   else if (mem_diff)
     {
       MemReader reader = { g_bytes_get_data (mem_diff, NULL), g_bytes_get_size (mem_diff), 0 };
-      ok = _ostree_delta_compress (&copts, mem_reader_read, &reader, part_writer_write, &writer,
+      ok = _ostree_delta_compress (&copts, mem_reader_read, &reader, out_write, out_data,
                                    cancellable, error);
     }
+  else if (lseek (diff_tmpf.fd, 0, SEEK_SET) < 0)
+    ok = glnx_throw_errno_prefix (error, "lseek");
   else
     {
-      if (lseek (diff_tmpf.fd, 0, SEEK_SET) < 0)
-        return glnx_throw_errno_prefix (error, "lseek");
       FdReader reader = { diff_tmpf.fd };
-      ok = _ostree_delta_compress (&copts, fd_reader_read, &reader, part_writer_write, &writer,
+      ok = _ostree_delta_compress (&copts, fd_reader_read, &reader, out_write, out_data,
                                    cancellable, error);
     }
+  if (pipelined)
+    ok = async_sink_finish (&sink, ok, error);
   if (!ok)
     return FALSE;
 
