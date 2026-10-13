@@ -35,6 +35,8 @@ static gboolean opt_empty;
 static gboolean opt_swap_endianness;
 static gboolean opt_inline;
 static gboolean opt_disable_bsdiff;
+static char *opt_file_delta;
+static char *opt_compression;
 static gboolean opt_if_not_exists;
 static char **opt_key_ids;
 static char *opt_sign_name;
@@ -85,6 +87,14 @@ static GOptionEntry generate_options[] = {
   { "inline", 0, 0, G_OPTION_ARG_NONE, &opt_inline, "Inline delta parts into main delta", NULL },
   { "to", 0, 0, G_OPTION_ARG_STRING, &opt_to_rev, "Create delta to revision REV", "REV" },
   { "disable-bsdiff", 0, 0, G_OPTION_ARG_NONE, &opt_disable_bsdiff, "Disable use of bsdiff", NULL },
+  { "file-delta", 0, 0, G_OPTION_ARG_STRING, &opt_file_delta,
+    "Per-file delta algorithm: bsdiff (default) or hdiff (much faster to generate; needs an ostree "
+    "with hdiffpatch support to apply)",
+    "ALGO" },
+  { "compression", 0, 0, G_OPTION_ARG_STRING, &opt_compression,
+    "Delta part compression: xz (default) or zstd[:LEVEL] (much faster; needs an ostree with zstd "
+    "support to apply)",
+    "TYPE" },
   { "if-not-exists", 'n', 0, G_OPTION_ARG_NONE, &opt_if_not_exists,
     "Only generate if a delta does not already exist", NULL },
   { "set-endianness", 0, 0, G_OPTION_ARG_STRING, &opt_endianness,
@@ -406,6 +416,38 @@ ot_static_delta_builtin_generate (int argc, char **argv, OstreeCommandInvocation
       if (opt_disable_bsdiff)
         g_variant_builder_add (parambuilder, "{sv}", "bsdiff-enabled",
                                g_variant_new_boolean (FALSE));
+      if (opt_file_delta)
+        g_variant_builder_add (parambuilder, "{sv}", "file-delta",
+                               g_variant_new_string (opt_file_delta));
+      if (opt_compression)
+        {
+          g_auto (GStrv) parts = g_strsplit (opt_compression, ":", 2);
+          guint8 type;
+          if (g_strcmp0 (parts[0], "xz") == 0)
+            type = 'x';
+          else if (g_strcmp0 (parts[0], "zstd") == 0)
+            type = 'z';
+          else
+            {
+              g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED, "Invalid compression type '%s'",
+                           opt_compression);
+              return FALSE;
+            }
+          g_variant_builder_add (parambuilder, "{sv}", "compression", g_variant_new_byte (type));
+          if (parts[0] != NULL && parts[1] != NULL)
+            {
+              char *end = NULL;
+              gint64 level = g_ascii_strtoll (parts[1], &end, 10);
+              if (type != 'z' || end == parts[1] || *end != '\0' || level < -100 || level > 22)
+                {
+                  g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                               "Invalid compression level in '%s'", opt_compression);
+                  return FALSE;
+                }
+              g_variant_builder_add (parambuilder, "{sv}", "compression-level",
+                                     g_variant_new_int32 ((gint32)level));
+            }
+        }
       if (opt_inline)
         g_variant_builder_add (parambuilder, "{sv}", "inline-parts", g_variant_new_boolean (TRUE));
       if (opt_filename)

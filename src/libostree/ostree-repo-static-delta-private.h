@@ -135,9 +135,19 @@ typedef enum
   OSTREE_STATIC_DELTA_OP_SET_READ_SOURCE = 'r',
   OSTREE_STATIC_DELTA_OP_UNSET_READ_SOURCE = 'R',
   OSTREE_STATIC_DELTA_OP_CLOSE = 'c',
-  OSTREE_STATIC_DELTA_OP_BSPATCH = 'B'
+  OSTREE_STATIC_DELTA_OP_BSPATCH = 'B',
+  /* Like BSPATCH, but the payload is an uncompressed HDiffPatch
+   * single-stream diff.  Only emitted when explicitly requested.
+   */
+  OSTREE_STATIC_DELTA_OP_HPATCH = 'H'
 } OstreeStaticDeltaOpCode;
-#define OSTREE_STATIC_DELTA_N_OPS 7
+#define OSTREE_STATIC_DELTA_N_OPS 8
+
+/* Values of the leading compression byte of a delta part */
+#define OSTREE_STATIC_DELTA_COMPRESSION_NONE 0
+#define OSTREE_STATIC_DELTA_COMPRESSION_XZ 'x'
+#define OSTREE_STATIC_DELTA_COMPRESSION_ZSTD 'z'
+#define OSTREE_STATIC_DELTA_ZSTD_DEFAULT_LEVEL 10
 
 gboolean _ostree_static_delta_part_open (GInputStream *part_in, GBytes *inline_part_bytes,
                                          OstreeStaticDeltaOpenFlags flags,

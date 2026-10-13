@@ -30,6 +30,9 @@
 #include "bsdiff/bspatch.h"
 #include "ostree-core-private.h"
 #include "ostree-lzma-decompressor.h"
+#ifdef HAVE_HDIFFPATCH
+#include "ostree-hdiff.h"
+#endif
 #include "ostree-repo-private.h"
 #include "ostree-repo-static-delta-private.h"
 #include "ostree-varint.h"
@@ -95,6 +98,7 @@ OPPROTO (set_read_source)
 OPPROTO (unset_read_source)
 OPPROTO (close)
 OPPROTO (bspatch)
+OPPROTO (hpatch)
 #undef OPPROTO
 
 static void
@@ -156,6 +160,8 @@ delta_opcode_index (OstreeStaticDeltaOpCode op)
       return 5;
     case OSTREE_STATIC_DELTA_OP_BSPATCH:
       return 6;
+    case OSTREE_STATIC_DELTA_OP_HPATCH:
+      return 7;
     default:
       g_assert_not_reached ();
     }
@@ -247,6 +253,10 @@ _ostree_static_delta_part_execute (OstreeRepo *repo, GVariant *objects, GVariant
           break;
         case OSTREE_STATIC_DELTA_OP_BSPATCH:
           if (!dispatch_bspatch (repo, state, cancellable, error))
+            goto out;
+          break;
+        case OSTREE_STATIC_DELTA_OP_HPATCH:
+          if (!dispatch_hpatch (repo, state, cancellable, error))
             goto out;
           break;
         default:
@@ -462,6 +472,62 @@ dispatch_bspatch (OstreeRepo *repo, StaticDeltaExecutionState *state, GCancellab
     }
 
   return TRUE;
+}
+
+static gboolean
+dispatch_hpatch (OstreeRepo *repo, StaticDeltaExecutionState *state, GCancellable *cancellable,
+                 GError **error)
+{
+  GLNX_AUTO_PREFIX_ERROR ("opcode hpatch", error);
+  guint64 offset, length;
+
+  if (!read_varuint64 (state, &offset, error))
+    return FALSE;
+  if (!read_varuint64 (state, &length, error))
+    return FALSE;
+  if (!validate_ofs (state, offset, length, error))
+    return FALSE;
+
+  if (state->stats_only)
+    return TRUE; /* Early return */
+
+#ifdef HAVE_HDIFFPATCH
+  if (!state->have_obj)
+    {
+      if (state->read_source_fd == -1)
+        return glnx_throw (error, "No read source set");
+
+      g_autoptr (GMappedFile) input_mfile
+          = g_mapped_file_new_from_fd (state->read_source_fd, FALSE, error);
+      if (!input_mfile)
+        return FALSE;
+
+      /* As in dispatch_bspatch(): refuse sizes we cannot allocate */
+      if (G_UNLIKELY (state->content_size > G_MAXSIZE || state->content_size > (guint64)G_MAXINT64))
+        return glnx_throw (error,
+                           "Invalid content size %" G_GUINT64_FORMAT
+                           " in static delta hpatch operation",
+                           state->content_size);
+
+      const gsize alloc_size = (gsize)state->content_size;
+      g_autofree guchar *buf = g_try_malloc (MAX (alloc_size, 1));
+      if (buf == NULL)
+        return glnx_throw (error, "Failed to allocate %" G_GSIZE_FORMAT " bytes", alloc_size);
+
+      if (!_ostree_hdiff_patch_mem ((const guint8 *)g_mapped_file_get_contents (input_mfile),
+                                    g_mapped_file_get_length (input_mfile),
+                                    state->payload_data + offset, length, buf, alloc_size, error))
+        return FALSE;
+
+      if (!_ostree_repo_bare_content_write (repo, &state->content_out, buf, state->content_size,
+                                            cancellable, error))
+        return FALSE;
+    }
+
+  return TRUE;
+#else
+  return glnx_throw (error, "This version of ostree was built without hdiffpatch support");
+#endif
 }
 
 static gboolean

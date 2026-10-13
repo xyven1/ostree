@@ -29,6 +29,12 @@
 #include "ostree-core-private.h"
 #include "ostree-diff.h"
 #include "ostree-lzma-compressor.h"
+#ifdef HAVE_ZSTD
+#include "ostree-zstd-compressor.h"
+#endif
+#ifdef HAVE_HDIFFPATCH
+#include "ostree-hdiff.h"
+#endif
 #include "ostree-repo-private.h"
 #include "ostree-repo-static-delta-private.h"
 #include "ostree-rollsum.h"
@@ -80,6 +86,11 @@ typedef struct
   guint n_rollsum;
   guint n_bsdiff;
   guint n_fallback;
+  /* One of the OSTREE_STATIC_DELTA_COMPRESSION_* values */
+  guint8 compression;
+  int compression_level;
+  /* Use HDiffPatch rather than bsdiff for per-file deltas */
+  gboolean use_hdiff;
   gboolean swap_endian;
   int parts_dfd;
   DeltaOpts delta_opts;
@@ -259,9 +270,20 @@ finish_part (OstreeStaticDeltaBuilder *builder, GError **error)
     g_variant_ref_sink (delta_part_content);
   }
 
-  /* Hardcode xz for now */
-  compressor = (GConverter *)_ostree_lzma_compressor_new (NULL);
-  compression_type_char = 'x';
+  compression_type_char = builder->compression;
+  switch (builder->compression)
+    {
+    case OSTREE_STATIC_DELTA_COMPRESSION_XZ:
+      compressor = (GConverter *)_ostree_lzma_compressor_new (NULL);
+      break;
+#ifdef HAVE_ZSTD
+    case OSTREE_STATIC_DELTA_COMPRESSION_ZSTD:
+      compressor = (GConverter *)_ostree_zstd_compressor_new (builder->compression_level);
+      break;
+#endif
+    default:
+      g_assert_not_reached ();
+    }
   part_payload_in = variant_to_inputstream (delta_part_content);
   part_payload_out = (GMemoryOutputStream *)g_memory_output_stream_new (NULL, 0, g_realloc, g_free);
   part_payload_compressor = (GConverterOutputStream *)g_converter_output_stream_new (
@@ -575,7 +597,8 @@ get_unpacked_unlinked_content (OstreeRepo *repo, const char *checksum, GBytes **
 
 static gboolean
 try_content_bsdiff (OstreeRepo *repo, const char *from, const char *to, ContentBsdiff **out_bsdiff,
-                    guint64 max_bsdiff_size_bytes, GCancellable *cancellable, GError **error)
+                    guint64 max_bsdiff_size_bytes, gboolean use_hdiff, GCancellable *cancellable,
+                    GError **error)
 {
 
   g_autoptr (GFileInfo) from_finfo = NULL;
@@ -587,8 +610,12 @@ try_content_bsdiff (OstreeRepo *repo, const char *from, const char *to, ContentB
 
   *out_bsdiff = NULL;
 
-  /* Ignore this if it's too large */
-  if (g_file_info_get_size (to_finfo) + g_file_info_get_size (from_finfo) > max_bsdiff_size_bytes)
+  /* Ignore this if it's too large.  The limit exists because of bsdiff's
+   * time and memory cost; hdiff is cheap enough not to need it.
+   */
+  if (!use_hdiff
+      && g_file_info_get_size (to_finfo) + g_file_info_get_size (from_finfo)
+             > max_bsdiff_size_bytes)
     return TRUE;
 
   ContentBsdiff *ret_bsdiff = g_new0 (ContentBsdiff, 1);
@@ -847,6 +874,22 @@ process_one_bsdiff (OstreeRepo *repo, OstreeStaticDeltaBuilder *builder,
     _ostree_write_varuint64 (current_part->operations, xattr_offset);
     _ostree_write_varuint64 (current_part->operations, content_size);
 
+#ifdef HAVE_HDIFFPATCH
+    if (builder->use_hdiff)
+      {
+        g_autoptr (GBytes) diff = NULL;
+        if (!_ostree_hdiff_create_mem (tmp_from_buf, tmp_from_len, tmp_to_buf, tmp_to_len, NULL,
+                                       &diff, error))
+          return FALSE;
+
+        g_string_append_c (current_part->operations, (gchar)OSTREE_STATIC_DELTA_OP_HPATCH);
+        _ostree_write_varuint64 (current_part->operations, current_part->payload->len);
+        _ostree_write_varuint64 (current_part->operations, g_bytes_get_size (diff));
+        g_string_append_len (current_part->payload, g_bytes_get_data (diff, NULL),
+                             g_bytes_get_size (diff));
+      }
+    else
+#endif
     {
       struct bsdiff_stream stream;
       struct bzdiff_opaque_s op;
@@ -1053,7 +1096,8 @@ generate_delta_lowlatency (OstreeRepo *repo, const char *from, const char *to, D
       if (!(opts & DELTAOPT_FLAG_DISABLE_BSDIFF))
         {
           if (!try_content_bsdiff (repo, from_checksum, to_checksum, &bsdiff,
-                                   builder->max_bsdiff_size_bytes, cancellable, error))
+                                   builder->max_bsdiff_size_bytes, builder->use_hdiff,
+                                   cancellable, error))
             return FALSE;
 
           if (bsdiff)
@@ -1265,7 +1309,12 @@ get_fallback_headers (OstreeRepo *self, OstreeStaticDeltaBuilder *builder, GVari
  *   - max-chunk-size: u: Maximum size in megabytes of a delta part
  *   - max-bsdiff-size: u: Maximum size in megabytes to consider bsdiff compression
  *   for input files
- *   - compression: y: Compression type: 0=none, x=lzma, g=gzip
+ *   - compression: y: Compression type for delta parts: x=lzma (default), z=zstd.  Deltas
+ * using zstd cannot be applied by versions of ostree without zstd support.
+ *   - compression-level: i: Compression level; currently only used for zstd.  Default 10.
+ *   - file-delta: s: Per-file delta algorithm: "bsdiff" (default) or "hdiff".  hdiff is
+ * around 100x faster to generate, is not subject to max-bsdiff-size, and cannot be applied
+ * by versions of ostree without hdiffpatch support.
  *   - bsdiff-enabled: b: Enable bsdiff compression.  Default TRUE.
  *   - inline-parts: b: Put part data in header, to get a single file delta.  Default FALSE.
  *   - verbose: b: Print diagnostic messages.  Default FALSE.
@@ -1335,6 +1384,47 @@ ostree_repo_static_delta_generate (OstreeRepo *self, OstreeStaticDeltaGenerateOp
       use_bsdiff = TRUE;
     if (!use_bsdiff)
       delta_opts |= DELTAOPT_FLAG_DISABLE_BSDIFF;
+  }
+
+  {
+    const char *file_delta = NULL;
+    if (!g_variant_lookup (params, "file-delta", "&s", &file_delta))
+      file_delta = "bsdiff";
+    if (strcmp (file_delta, "hdiff") == 0)
+      {
+#ifdef HAVE_HDIFFPATCH
+        builder.use_hdiff = TRUE;
+#else
+        return glnx_throw (error, "This version of ostree was built without hdiffpatch support");
+#endif
+      }
+    else if (strcmp (file_delta, "bsdiff") != 0)
+      return glnx_throw (error, "Invalid 'file-delta' parameter '%s'", file_delta);
+  }
+
+  {
+    guint8 compression;
+    if (!g_variant_lookup (params, "compression", "y", &compression))
+      compression = OSTREE_STATIC_DELTA_COMPRESSION_XZ;
+    switch (compression)
+      {
+      case OSTREE_STATIC_DELTA_COMPRESSION_XZ:
+        break;
+      case OSTREE_STATIC_DELTA_COMPRESSION_ZSTD:
+#ifdef HAVE_ZSTD
+        break;
+#else
+        return glnx_throw (error, "This version of ostree was built without zstd support");
+#endif
+      default:
+        return glnx_throw (error, "Invalid 'compression' parameter '%c'", compression);
+      }
+    builder.compression = compression;
+
+    gint32 level;
+    if (!g_variant_lookup (params, "compression-level", "i", &level))
+      level = OSTREE_STATIC_DELTA_ZSTD_DEFAULT_LEVEL;
+    builder.compression_level = level;
   }
 
   {

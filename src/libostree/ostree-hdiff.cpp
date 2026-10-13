@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "libHDiffPatch/HDiff/diff.h"
+#include "libHDiffPatch/HDiff/private_diff/limit_mem_diff/stream_serialize.h"
 #include "libHDiffPatch/HPatch/patch.h"
 
 #include "ostree-hdiff.h"
@@ -193,14 +194,20 @@ _ostree_hdiff_create_mem (const guint8 *old_data, gsize old_len, const guint8 *n
   try
     {
       std::vector<unsigned char> diff;
-      /* HDiffPatch takes non-const pointers but only reads through them */
-      unsigned char *newp = const_cast<unsigned char *> (new_data);
-      unsigned char *oldp = const_cast<unsigned char *> (old_data);
       const size_t threads = MAX (options->threads, 1);
-      create_single_compressed_diff_block (newp, newp + new_len, oldp, oldp + old_len, diff, NULL,
+      /* Go through the stream entry point, which copies what it needs: the
+       * in-memory one temporarily rewrites its input buffers in place, and
+       * ours are frequently read-only mappings of repository objects.
+       */
+      hpatch_TStreamInput old_stream, new_stream;
+      mem_as_hStreamInput (&old_stream, old_data, old_data + old_len);
+      mem_as_hStreamInput (&new_stream, new_data, new_data + new_len);
+      hdiff_private::TVectorAsStreamOutput out_stream (diff);
+      const hdiff_TMTSets_s mtsets = { threads, threads, true, true };
+      create_single_compressed_diff_block (&new_stream, &old_stream, &out_stream, NULL,
                                            OT_HDIFF_STEP_MEM,
                                            MAX (options->fast_match_block, kMatchBlockSize_min),
-                                           options->match_score, options->big_cache, threads);
+                                           options->match_score, options->big_cache, &mtsets);
       *out_diff = g_bytes_new (diff.data (), diff.size ());
     }
   catch (const std::exception &e)
