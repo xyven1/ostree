@@ -16,7 +16,7 @@
 # License along with this library. If not, see <https://www.gnu.org/licenses/>.
 
 # Static deltas using HDiffPatch: the hdiff per-file delta and zstd part
-# compression for the classic scheme, and stream deltas.
+# compression for the classic scheme, and bulk deltas.
 
 set -euo pipefail
 
@@ -97,7 +97,7 @@ apply_and_check() {
     assert_files_equal expected-ls.txt actual-ls.txt
 }
 
-mkdir -p deltas/hdiff-dir deltas/zstd-dir deltas/stream-dir
+mkdir -p deltas/hdiff-dir deltas/zstd-dir deltas/bulk-dir
 
 # The classic scheme, for size comparisons below
 ${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} \
@@ -145,55 +145,55 @@ for bad in lz4 zstd:abc zstd:99 xz:3; do
 done
 echo "ok zstd part compression"
 
-# Stream deltas at every effort, inline
+# Bulk deltas at every effort, inline
 for effort in 0 1 2 3 4 5 6 7 8 9; do
     ${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} \
-                  --inline --filename=deltas/stream-${effort} --stream --effort=${effort}
-    apply_and_check deltas/stream-${effort}
+                  --inline --filename=deltas/bulk-${effort} --bulk --effort=${effort}
+    apply_and_check deltas/bulk-${effort}
 done
-echo "ok stream delta at every effort"
+echo "ok bulk delta at every effort"
 
 # The whole point: far smaller than the classic scheme on an update
-stream_size=$(stat -c '%s' deltas/stream-5)
-if test $((stream_size * 3)) -gt ${classic_size}; then
-    assert_not_reached "stream delta (${stream_size}) not much smaller than classic (${classic_size})"
+bulk_size=$(stat -c '%s' deltas/bulk-5)
+if test $((bulk_size * 3)) -gt ${classic_size}; then
+    assert_not_reached "bulk delta (${bulk_size}) not much smaller than classic (${classic_size})"
 fi
-echo "ok stream delta size"
+echo "ok bulk delta size"
 
 # Generated from a bare-user repo, parts as separate files, single threaded
 ${CMD_PREFIX} ostree --repo=repo-bare static-delta generate --from=${origrev} --to=${newrev} \
-              --filename=deltas/stream-dir/superblock --stream --threads=1 2>&1 | tee out.txt
-assert_file_has_content out.txt 'stream part 1 (modified)'
-assert_has_file deltas/stream-dir/0
-apply_and_check deltas/stream-dir/superblock
-echo "ok stream delta from bare-user repo with separate parts"
+              --filename=deltas/bulk-dir/superblock --bulk --threads=1 2>&1 | tee out.txt
+assert_file_has_content out.txt 'bulk part 1 (modified)'
+assert_has_file deltas/bulk-dir/0
+apply_and_check deltas/bulk-dir/superblock
+echo "ok bulk delta from bare-user repo with separate parts"
 
 # From empty
 for effort in 0 5 9; do
     ${CMD_PREFIX} ostree --repo=repo static-delta generate --empty --to=${newrev} \
-                  --inline --filename=deltas/stream-empty-${effort} --stream --effort=${effort} \
+                  --inline --filename=deltas/bulk-empty-${effort} --bulk --effort=${effort} \
                   2>&1 | tee out.txt
-    assert_file_has_content out.txt 'stream part 1 (all)'
-    apply_and_check deltas/stream-empty-${effort} empty
+    assert_file_has_content out.txt 'bulk part 1 (all)'
+    apply_and_check deltas/bulk-empty-${effort} empty
 done
 ${CMD_PREFIX} ostree --repo=repo-bare static-delta generate --empty --to=${newrev} \
-              --inline --filename=deltas/stream-empty-bare --stream
-apply_and_check deltas/stream-empty-bare empty
-echo "ok stream delta from empty"
+              --inline --filename=deltas/bulk-empty-bare --bulk
+apply_and_check deltas/bulk-empty-bare empty
+echo "ok bulk delta from empty"
 
 # Objects the target already has are skipped, not rewritten
 rm -rf target
 ${CMD_PREFIX} ostree --repo=target init --mode=bare-user
 ${CMD_PREFIX} ostree --repo=target pull-local repo ${origrev}
-${CMD_PREFIX} ostree --repo=target static-delta apply-offline deltas/stream-5
-${CMD_PREFIX} ostree --repo=target static-delta apply-offline deltas/stream-5
+${CMD_PREFIX} ostree --repo=target static-delta apply-offline deltas/bulk-5
+${CMD_PREFIX} ostree --repo=target static-delta apply-offline deltas/bulk-5
 ${CMD_PREFIX} ostree --repo=target fsck
-echo "ok stream delta applied twice"
+echo "ok bulk delta applied twice"
 
-# In-repository stream delta: show, and pull through it
-${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} --stream
+# In-repository bulk delta: show, and pull through it
+${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} --bulk
 ${CMD_PREFIX} ostree --repo=repo static-delta show ${origrev}-${newrev} > show.txt
-assert_file_has_content show.txt 'PartPayload0: stream kind=hdiff'
+assert_file_has_content show.txt 'PartPayload0: bulk kind=hdiff'
 ${CMD_PREFIX} ostree --repo=repo summary -u
 rm -rf target
 ${CMD_PREFIX} ostree --repo=target init --mode=bare-user
@@ -202,22 +202,22 @@ ${CMD_PREFIX} ostree --repo=target pull-local --require-static-deltas repo ${new
 ${CMD_PREFIX} ostree --repo=target fsck
 ${CMD_PREFIX} ostree --repo=target ls -R -C ${newrev} > actual-ls.txt
 assert_files_equal expected-ls.txt actual-ls.txt
-echo "ok pull via stream delta"
+echo "ok pull via bulk delta"
 
 # Applying needs the origin objects, and a bare repository
 rm -rf target
 ${CMD_PREFIX} ostree --repo=target init --mode=bare-user
-if ${CMD_PREFIX} ostree --repo=target static-delta apply-offline deltas/stream-5 2>err.txt; then
-    assert_not_reached "applying a stream delta without its origin unexpectedly succeeded"
+if ${CMD_PREFIX} ostree --repo=target static-delta apply-offline deltas/bulk-5 2>err.txt; then
+    assert_not_reached "applying a bulk delta without its origin unexpectedly succeeded"
 fi
 rm -rf target
 ${CMD_PREFIX} ostree --repo=target init --mode=archive
 ${CMD_PREFIX} ostree --repo=target pull-local repo ${origrev}
-if ${CMD_PREFIX} ostree --repo=target static-delta apply-offline deltas/stream-5 2>err.txt; then
-    assert_not_reached "applying a stream delta to an archive repo unexpectedly succeeded"
+if ${CMD_PREFIX} ostree --repo=target static-delta apply-offline deltas/bulk-5 2>err.txt; then
+    assert_not_reached "applying a bulk delta to an archive repo unexpectedly succeeded"
 fi
 assert_file_has_content err.txt 'only be applied to bare repositories'
-echo "ok stream delta apply preconditions"
+echo "ok bulk delta apply preconditions"
 
 # Damaged deltas fail cleanly, without writing bad objects.  Separate part
 # files are checksummed; inline parts are not, so there the damage reaches
@@ -227,18 +227,18 @@ fresh_target() {
     ${CMD_PREFIX} ostree --repo=target init --mode=bare-user
     ${CMD_PREFIX} ostree --repo=target pull-local repo ${origrev}
 }
-size=$(stat -c '%s' deltas/stream-dir/0)
-rm -rf damaged && cp -r deltas/stream-dir damaged
+size=$(stat -c '%s' deltas/bulk-dir/0)
+rm -rf damaged && cp -r deltas/bulk-dir damaged
 truncate -s $((size / 2)) damaged/0
 fresh_target
 if ${CMD_PREFIX} ostree --repo=target static-delta apply-offline damaged/superblock 2>err.txt; then
-    assert_not_reached "applying a truncated stream delta unexpectedly succeeded"
+    assert_not_reached "applying a truncated bulk delta unexpectedly succeeded"
 fi
 assert_file_has_content err.txt 'Checksum mismatch in static delta part'
 for effort in 0 5; do
-    size=$(stat -c '%s' deltas/stream-${effort})
+    size=$(stat -c '%s' deltas/bulk-${effort})
     for offset in 40 400 2000; do
-        cp deltas/stream-${effort} damaged-inline
+        cp deltas/bulk-${effort} damaged-inline
         printf '\377\000\377\000\377\000\377\000' \
             | dd of=damaged-inline bs=1 seek=$((size - offset)) conv=notrunc status=none
         fresh_target
@@ -250,17 +250,17 @@ for effort in 0 5; do
         ${CMD_PREFIX} ostree --repo=target fsck
     done
 done
-echo "ok damaged stream delta"
+echo "ok damaged bulk delta"
 
 # Option validation
 if ${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} \
-                 --stream --effort=10 --filename=deltas/bad 2>err.txt; then
+                 --bulk --effort=10 --filename=deltas/bad 2>err.txt; then
     assert_not_reached "--effort=10 unexpectedly succeeded"
 fi
 assert_file_has_content err.txt "Invalid 'effort'"
 if ${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} \
                  --effort=3 --filename=deltas/bad 2>err.txt; then
-    assert_not_reached "--effort without --stream unexpectedly succeeded"
+    assert_not_reached "--effort without --bulk unexpectedly succeeded"
 fi
-assert_file_has_content err.txt "require --stream"
+assert_file_has_content err.txt "require --bulk"
 echo "ok option validation"

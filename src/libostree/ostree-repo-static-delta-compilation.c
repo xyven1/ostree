@@ -1319,15 +1319,15 @@ get_fallback_headers (OstreeRepo *self, OstreeStaticDeltaBuilder *builder, GVari
  *   - compression: y: Compression type for delta parts: x=lzma (default), z=zstd.  Deltas
  * using zstd cannot be applied by versions of ostree without zstd support.
  *   - compression-level: i: Compression level; currently only used for zstd.  Default 10.
- *   - stream: b: Generate a "stream" delta: instead of per-file deltas, whole groups of
+ *   - bulk: b: Generate a "bulk" delta: instead of per-file deltas, whole groups of
  * objects (including directory metadata) are diffed against each other with HDiffPatch.  Far
- * faster and smaller than the default scheme.  Stream deltas never contain fallback objects
+ * faster and smaller than the default scheme.  Bulk deltas never contain fallback objects
  * and ignore min-fallback-size, max-bsdiff-size, max-chunk-size, bsdiff-enabled, file-delta
  * and compression.  They need hdiffpatch support (and for efforts below 5, zstd) to generate
  * and apply, and can only be applied to bare repositories.  Default FALSE.
- *   - effort: u: For stream deltas, from 0 (fastest generation; for tight development loops)
+ *   - effort: u: For bulk deltas, from 0 (fastest generation; for tight development loops)
  * to 9 (smallest result; for expensive links).  Efforts 0-4 use zstd, 5-9 xz.  Default 5.
- *   - threads: u: For stream deltas, the number of threads to use; 0 (the default) uses one
+ *   - threads: u: For bulk deltas, the number of threads to use; 0 (the default) uses one
  * per processor.
  *   - file-delta: s: Per-file delta algorithm: "bsdiff" (default) or "hdiff".  hdiff is
  * around 100x faster to generate, is not subject to max-bsdiff-size, and cannot be applied
@@ -1403,19 +1403,19 @@ ostree_repo_static_delta_generate (OstreeRepo *self, OstreeStaticDeltaGenerateOp
       delta_opts |= DELTAOPT_FLAG_DISABLE_BSDIFF;
   }
 
-  gboolean use_stream;
-  OstreeStaticDeltaStreamOptions stream_options = {
+  gboolean use_bulk;
+  OstreeStaticDeltaBulkOptions bulk_options = {
     0,
   };
-  if (!g_variant_lookup (params, "stream", "b", &use_stream))
-    use_stream = FALSE;
-  if (!g_variant_lookup (params, "effort", "u", &stream_options.effort))
-    stream_options.effort = OSTREE_STATIC_DELTA_STREAM_EFFORT_DEFAULT;
-  if (stream_options.effort > OSTREE_STATIC_DELTA_STREAM_EFFORT_MAX)
+  if (!g_variant_lookup (params, "bulk", "b", &use_bulk))
+    use_bulk = FALSE;
+  if (!g_variant_lookup (params, "effort", "u", &bulk_options.effort))
+    bulk_options.effort = OSTREE_STATIC_DELTA_BULK_EFFORT_DEFAULT;
+  if (bulk_options.effort > OSTREE_STATIC_DELTA_BULK_EFFORT_MAX)
     return glnx_throw (error, "Invalid 'effort' parameter %u (maximum is %u)",
-                       stream_options.effort, OSTREE_STATIC_DELTA_STREAM_EFFORT_MAX);
-  if (!g_variant_lookup (params, "threads", "u", &stream_options.threads))
-    stream_options.threads = 0;
+                       bulk_options.effort, OSTREE_STATIC_DELTA_BULK_EFFORT_MAX);
+  if (!g_variant_lookup (params, "threads", "u", &bulk_options.threads))
+    bulk_options.threads = 0;
 
   {
     const char *file_delta = NULL;
@@ -1513,20 +1513,20 @@ ostree_repo_static_delta_generate (OstreeRepo *self, OstreeStaticDeltaGenerateOp
     }
   builder.parts_dfd = descriptor_dfd;
 
-  if (use_stream)
+  if (use_bulk)
     {
-      g_autoptr (GPtrArray) stream_parts
-          = g_ptr_array_new_with_free_func ((GDestroyNotify)_ostree_static_delta_stream_part_free);
-      stream_options.verbose = (delta_opts & DELTAOPT_FLAG_VERBOSE) > 0;
-      stream_options.swap_endian = builder.swap_endian;
-      if (!_ostree_static_delta_stream_generate (self, from, to, &stream_options, descriptor_dfd,
-                                                 stream_parts, cancellable, error))
+      g_autoptr (GPtrArray) bulk_parts
+          = g_ptr_array_new_with_free_func ((GDestroyNotify)_ostree_static_delta_bulk_part_free);
+      bulk_options.verbose = (delta_opts & DELTAOPT_FLAG_VERBOSE) > 0;
+      bulk_options.swap_endian = builder.swap_endian;
+      if (!_ostree_static_delta_bulk_generate (self, from, to, &bulk_options, descriptor_dfd,
+                                                 bulk_parts, cancellable, error))
         return FALSE;
 
       /* Hand the finished parts to the common superblock code below */
-      for (guint j = 0; j < stream_parts->len; j++)
+      for (guint j = 0; j < bulk_parts->len; j++)
         {
-          OstreeStaticDeltaStreamPart *stream_part = stream_parts->pdata[j];
+          OstreeStaticDeltaBulkPart *stream_part = bulk_parts->pdata[j];
           OstreeStaticDeltaPartBuilder *part = allocate_part_builder ();
           part->part_tmpf = stream_part->tmpf;
           stream_part->tmpf.initialized = FALSE;

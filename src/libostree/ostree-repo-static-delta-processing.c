@@ -184,9 +184,9 @@ _ostree_static_delta_part_execute (OstreeRepo *repo, GVariant *objects, GVariant
   StaticDeltaExecutionState *state = &statedata;
   guint n_executed = 0;
 
-  /* Stream parts have their own format and executor */
+  /* Bulk parts have their own format and executor */
   if (g_variant_is_of_type (part, G_VARIANT_TYPE ("ay")))
-    return _ostree_static_delta_stream_part_execute (repo, objects, part, stats_only, cancellable,
+    return _ostree_static_delta_bulk_part_execute (repo, objects, part, stats_only, cancellable,
                                                      error);
 
   static_delta_execution_state_init (&statedata);

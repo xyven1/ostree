@@ -36,7 +36,7 @@ static gboolean opt_swap_endianness;
 static gboolean opt_inline;
 static gboolean opt_disable_bsdiff;
 static char *opt_file_delta;
-static gboolean opt_stream;
+static gboolean opt_bulk;
 static char *opt_effort;
 static char *opt_threads;
 static char *opt_compression;
@@ -90,16 +90,16 @@ static GOptionEntry generate_options[] = {
   { "inline", 0, 0, G_OPTION_ARG_NONE, &opt_inline, "Inline delta parts into main delta", NULL },
   { "to", 0, 0, G_OPTION_ARG_STRING, &opt_to_rev, "Create delta to revision REV", "REV" },
   { "disable-bsdiff", 0, 0, G_OPTION_ARG_NONE, &opt_disable_bsdiff, "Disable use of bsdiff", NULL },
-  { "stream", 0, 0, G_OPTION_ARG_NONE, &opt_stream,
-    "Generate a stream delta: diff whole groups of objects with HDiffPatch instead of per-file "
+  { "bulk", 0, 0, G_OPTION_ARG_NONE, &opt_bulk,
+    "Generate a bulk delta: diff whole groups of objects with HDiffPatch instead of per-file "
     "deltas (much faster and smaller; needs an ostree with hdiffpatch support to apply)",
     NULL },
   { "effort", 0, 0, G_OPTION_ARG_STRING, &opt_effort,
-    "With --stream: 0 (fastest generation) to 9 (smallest delta); 0-4 use zstd, 5-9 xz.  Default "
+    "With --bulk: 0 (fastest generation) to 9 (smallest delta); 0-4 use zstd, 5-9 xz.  Default "
     "5",
     "N" },
   { "threads", 0, 0, G_OPTION_ARG_STRING, &opt_threads,
-    "With --stream: number of threads (default: one per processor)", "N" },
+    "With --bulk: number of threads (default: one per processor)", "N" },
   { "file-delta", 0, 0, G_OPTION_ARG_STRING, &opt_file_delta,
     "Per-file delta algorithm: bsdiff (default) or hdiff (much faster to generate; needs an ostree "
     "with hdiffpatch support to apply)",
@@ -429,10 +429,10 @@ ot_static_delta_builtin_generate (int argc, char **argv, OstreeCommandInvocation
       if (opt_disable_bsdiff)
         g_variant_builder_add (parambuilder, "{sv}", "bsdiff-enabled",
                                g_variant_new_boolean (FALSE));
-      if (opt_stream)
-        g_variant_builder_add (parambuilder, "{sv}", "stream", g_variant_new_boolean (TRUE));
+      if (opt_bulk)
+        g_variant_builder_add (parambuilder, "{sv}", "bulk", g_variant_new_boolean (TRUE));
       else if (opt_effort || opt_threads)
-        return glnx_throw (error, "--effort and --threads require --stream");
+        return glnx_throw (error, "--effort and --threads require --bulk");
       if (opt_effort)
         g_variant_builder_add (parambuilder, "{sv}", "effort",
                                g_variant_new_uint32 (g_ascii_strtoull (opt_effort, NULL, 10)));

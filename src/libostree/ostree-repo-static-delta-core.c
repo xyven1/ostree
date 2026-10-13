@@ -790,9 +790,9 @@ _ostree_static_delta_part_open (GInputStream *part_in, GBytes *inline_part_bytes
             G_VARIANT_TYPE (OSTREE_STATIC_DELTA_PART_PAYLOAD_FORMAT_V0), buf, FALSE);
       }
       break;
-    case OSTREE_STATIC_DELTA_PART_STREAM:
+    case OSTREE_STATIC_DELTA_PART_BULK:
       {
-        /* A stream part (see OSTREE_STATIC_DELTA_PART_STREAM) is not
+        /* A bulk part (see OSTREE_STATIC_DELTA_PART_BULK) is not
          * decompressed up front; we return its raw content as an "ay"
          * variant which _ostree_static_delta_part_execute() streams from.
          */
@@ -886,7 +886,7 @@ show_one_part (OstreeRepo *self, gboolean swap_endian, const char *from, const c
   if (g_variant_is_of_type (part, G_VARIANT_TYPE ("ay")))
     {
       g_autofree char *description = NULL;
-      if (!_ostree_static_delta_stream_part_describe (part, &description, error))
+      if (!_ostree_static_delta_bulk_part_describe (part, &description, error))
         return FALSE;
       g_print ("PartPayload%u: %s\n", i, description);
       if (!_ostree_static_delta_part_execute (self, objects, part, TRUE, NULL, cancellable, error))

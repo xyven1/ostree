@@ -214,9 +214,9 @@ cleanly on the unknown instruction or compression type.
    compression; zstd makes that an order of magnitude faster at the
    cost of deltas around a third larger.
 
-## Stream deltas
+## Bulk deltas
 
-`ostree static-delta generate --stream` produces a different kind of
+`ostree static-delta generate --bulk` produces a different kind of
 delta part.  Instead of a blob plus instructions and a delta per file,
 all of the objects of a part are concatenated into one *stream*:
 directory metadata objects first, then file content, each ordered by
@@ -237,7 +237,7 @@ Diffing whole groups of objects at once has three effects:
    example one whose name contains a build hash) diffs against its
    previous version.
 
-A stream delta has at most two parts, generated concurrently:
+A bulk delta has at most two parts, generated concurrently:
 
  - The *modified* part holds the new metadata objects and the new
    files whose basename matches a file that is gone from the target
@@ -261,13 +261,13 @@ efforts 5-9 compress with xz.  Compression is multi-threaded; use
 matters, since the diff is tiny either way; it matters when there is
 a lot of new content.
 
-When a stream part is applied, the old stream is read by random access
+When a bulk part is applied, the old stream is read by random access
 directly from the repository's objects, the diff is decompressed as it
 is consumed, and each object is written out and checksummed as the new
 stream is produced.  Memory use is small and independent of the size
 of the delta.
 
-Stream deltas use the same superblock as other deltas, so signing,
+Bulk deltas use the same superblock as other deltas, so signing,
 inline parts, `ostree pull` and `ostree static-delta apply-offline`
 all work unchanged.  Their limitations:
 
@@ -284,9 +284,9 @@ all work unchanged.  Their limitations:
    unprivileged user whose repository has a root-owned parent
    repository) therefore cannot apply them.
 
-### The stream part format
+### The bulk part format
 
-A stream part starts with the byte `s` where other parts have their
+A bulk part starts with the byte `b` where other parts have their
 compression type, followed by:
 
  - `y`: the compression of the header

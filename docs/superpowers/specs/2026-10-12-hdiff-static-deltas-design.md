@@ -49,7 +49,7 @@ Two things were asked for:
 - `--compression=zstd[:LEVEL]`: parts carry compression byte `z`.
 - Defaults are unchanged. Rollsum, object pairing and part layout are untouched.
 
-### Stream deltas (`--stream`)
+### Bulk deltas (`--bulk`)
 
 - Objects of a part are concatenated into a *new stream*: metadata objects first, then file content,
   each ordered by path. The part holds that stream, or one diff producing it from an *old stream*
@@ -60,7 +60,7 @@ Two things were asked for:
   - **new**: every other new file; block-matched against old files sharing a basename.
 - From-empty: one part, the compressed stream, no differ involved.
 - The superblock is unchanged, so inline parts, signing, `pull` and `apply-offline` work as before.
-  A stream part is recognised by a leading `s` where other parts have their compression byte. The
+  A bulk part is recognised by a leading `b` where other parts have their compression byte. The
   format is specified in `docs/formats.md`.
 - Applying streams end to end: old data is read by random access from repository objects, the diff
   is decompressed as it is consumed, objects are written and checksummed as they are produced.
@@ -125,13 +125,13 @@ The classic figure for the SDK OS was measured while other jobs were running and
 
 - **Non-world-readable diff sources.** The classic scheme refuses to use a file as a delta source
   unless it is world-readable, so that an unprivileged client with a root-owned parent repository
-  can still apply the delta. Stream deltas use such files. On the SDK OS pair, honouring the rule
+  can still apply the delta. Bulk deltas use such files. On the SDK OS pair, honouring the rule
   made the delta 47 KB instead of 18 KB, because the files that change every build (package caches,
   logs) are exactly the unreadable ones. This is safe for devices that apply updates as root; it is
   a one-line change in `generator_load_old_file()` to go back.
 - **Default effort 5.** Chosen because it roughly matches the size of today's deltas at 30 to 100
   times the speed. Efforts 0 to 4 need zstd on the client.
-- **No fallback objects in stream deltas.** `--min-fallback-size` is ignored rather than rejected.
+- **No fallback objects in bulk deltas.** `--min-fallback-size` is ignored rather than rejected.
 - **Compatibility.** All three features produce deltas that an unmodified ostree rejects with a
   clear error. Nothing changes unless the new options are passed.
 - **Pure suffix-array matching is not offered.** HDiffPatch's `-block-0` mode found no matches when
@@ -141,7 +141,7 @@ The classic figure for the SDK OS was measured while other jobs were running and
 
 ## Known limits
 
-- Stream deltas apply only to bare repositories (the same restriction as the classic `open`
+- Bulk deltas apply only to bare repositories (the same restriction as the classic `open`
   instruction), and need hdiffpatch on the client.
 - The precise differ holds the modified group in memory; above 4 GiB of old plus new data it falls
   back to the block-matching differ.
@@ -155,7 +155,7 @@ The classic figure for the SDK OS was measured while other jobs were running and
 
 - `tests/test-hdiff.c`: the wrapper (round trips through both differs and both patchers, empty
   source, rejection of mismatched sizes and corrupt diffs).
-- `tests/test-delta-hdiff.sh`: the drop-in options, and stream deltas at every effort; inline and
+- `tests/test-delta-hdiff.sh`: the drop-in options, and bulk deltas at every effort; inline and
   separate parts; generated from archive and bare-user repositories; from a commit and from empty;
   applied offline and through `pull --require-static-deltas`; apply preconditions; damaged deltas;
   option validation.

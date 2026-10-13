@@ -15,9 +15,9 @@
  * License along with this library. If not, see <https://www.gnu.org/licenses/>.
  */
 
-/* "Stream" static deltas: rather than computing a delta per file, objects are
+/* "Bulk" static deltas: rather than computing a delta per file, objects are
  * concatenated into streams and one HDiffPatch diff is made between whole
- * groups of them.  See OSTREE_STATIC_DELTA_PART_STREAM for the part format.
+ * groups of them.  See OSTREE_STATIC_DELTA_PART_BULK for the part format.
  *
  * A delta has up to two such parts:
  *
@@ -347,7 +347,7 @@ typedef struct
  * possible" (updates sent over expensive links).  Up to 4 the data is zstd
  * compressed, which also applies several times faster; from 5 it is xz.
  */
-static const EffortConfig effort_table[OSTREE_STATIC_DELTA_STREAM_EFFORT_MAX + 1] = {
+static const EffortConfig effort_table[OSTREE_STATIC_DELTA_BULK_EFFORT_MAX + 1] = {
   /* 0 */ { OSTREE_STATIC_DELTA_COMPRESSION_ZSTD, 1, FALSE, 0, FALSE, 1024, 1024 },
   /* 1 */ { OSTREE_STATIC_DELTA_COMPRESSION_ZSTD, 3, FALSE, 0, FALSE, 256, 1024 },
   /* 2 */ { OSTREE_STATIC_DELTA_COMPRESSION_ZSTD, 6, FALSE, 0, FALSE, 64, 1024 },
@@ -629,7 +629,7 @@ mem_reader_read (gpointer user_data, guint8 *buf, gsize len, GError **error)
 typedef struct
 {
   OstreeRepo *repo;
-  const OstreeStaticDeltaStreamOptions *options;
+  const OstreeStaticDeltaBulkOptions *options;
   const EffortConfig *effort;
   guint threads;
   int parts_dfd;
@@ -640,11 +640,11 @@ typedef struct
   GLnxTmpfile unpack_tmpf;
   guint64 unpack_size;
   gboolean bare;
-} StreamGenerator;
+} BulkGenerator;
 
 /* Add the content of regular file @checksum to @concat */
 static gboolean
-generator_append_file (StreamGenerator *self, Concat *concat, const char *checksum, guint64 size,
+generator_append_file (BulkGenerator *self, Concat *concat, const char *checksum, guint64 size,
                        GCancellable *cancellable, GError **error)
 {
   if (self->bare)
@@ -687,7 +687,7 @@ generator_append_file (StreamGenerator *self, Concat *concat, const char *checks
 }
 
 static gboolean
-generator_build_concat (StreamGenerator *self, GArray *objects, Concat **out_concat,
+generator_build_concat (BulkGenerator *self, GArray *objects, Concat **out_concat,
                         GCancellable *cancellable, GError **error)
 {
   g_autoptr (Concat) concat = concat_new (self->repo);
@@ -713,11 +713,11 @@ maybe_swap_u64 (gboolean swap, guint64 v)
  * @precise selects the in-memory differ.
  */
 static gboolean
-generator_emit_part (StreamGenerator *self, const char *name, guint part_index, GArray *new_objects,
+generator_emit_part (BulkGenerator *self, const char *name, guint part_index, GArray *new_objects,
                      GArray *old_objects, gboolean precise, VariantTable *modes,
                      VariantTable *xattrs, GCancellable *cancellable, GError **error)
 {
-  OstreeStaticDeltaStreamPart *part = self->out_parts->pdata[part_index];
+  OstreeStaticDeltaBulkPart *part = self->out_parts->pdata[part_index];
 
   const gint64 start_time = g_get_monotonic_time ();
 
@@ -832,8 +832,7 @@ generator_emit_part (StreamGenerator *self, const char *name, guint part_index, 
 
   g_autoptr (GVariant) header = g_variant_ref_sink (g_variant_new (
       "(yytt@ay@a(uuu)@aa(ayay)@a(uut))", copts.type,
-      (guint8)(use_diff ? OSTREE_STATIC_DELTA_STREAM_KIND_HDIFF
-                        : OSTREE_STATIC_DELTA_STREAM_KIND_RAW),
+      (guint8)(use_diff ? OSTREE_STATIC_DELTA_BULK_KIND_HDIFF : OSTREE_STATIC_DELTA_BULK_KIND_RAW),
       GUINT64_TO_LE (new_concat->size), GUINT64_TO_LE (data_size),
       ot_gvariant_new_bytearray (sources->data, sources->len),
       g_variant_builder_end (&modes_builder), g_variant_builder_end (&xattrs_builder),
@@ -860,7 +859,7 @@ generator_emit_part (StreamGenerator *self, const char *name, guint part_index, 
                                  cancellable, error))
       return FALSE;
 
-    const guint8 prefix[2] = { OSTREE_STATIC_DELTA_PART_STREAM, hopts.type };
+    const guint8 prefix[2] = { OSTREE_STATIC_DELTA_PART_BULK, hopts.type };
     const guint64 header_len = GUINT64_TO_LE ((guint64)stored->len);
     if (!part_writer_write (&writer, prefix, sizeof (prefix), error)
         || !part_writer_write (&writer, (const guint8 *)&header_len, sizeof (header_len), error)
@@ -908,9 +907,8 @@ generator_emit_part (StreamGenerator *self, const char *name, guint part_index, 
 
   if (self->options->verbose)
     g_printerr (
-        "stream part %u (%s): objects=%u sources=%u new=%" G_GUINT64_FORMAT
-        " old=%" G_GUINT64_FORMAT " %s=%" G_GUINT64_FORMAT " compressed=%" G_GUINT64_FORMAT
-        " (%s) in %.2fs\n",
+        "bulk part %u (%s): objects=%u sources=%u new=%" G_GUINT64_FORMAT " old=%" G_GUINT64_FORMAT
+        " %s=%" G_GUINT64_FORMAT " compressed=%" G_GUINT64_FORMAT " (%s) in %.2fs\n",
         part_index + 1, name, new_objects->len, use_diff ? old_objects->len : 0, new_concat->size,
         old_concat->size, !use_diff ? "raw" : (mem_diff ? "diff" : "blockdiff"), data_size,
         part->compressed_size, copts.type == OSTREE_STATIC_DELTA_COMPRESSION_ZSTD ? "zstd" : "xz",
@@ -921,7 +919,7 @@ generator_emit_part (StreamGenerator *self, const char *name, guint part_index, 
 
 /* Load what we need to know about new content object @checksum */
 static gboolean
-generator_load_new_file (StreamGenerator *self, const char *checksum, const char *path,
+generator_load_new_file (BulkGenerator *self, const char *checksum, const char *path,
                          VariantTable *modes, VariantTable *xattrs, StreamObject *out,
                          GCancellable *cancellable, GError **error)
 {
@@ -960,7 +958,7 @@ generator_load_new_file (StreamGenerator *self, const char *checksum, const char
  * FALSE if it should not be used.
  */
 static gboolean
-generator_load_old_file (StreamGenerator *self, const char *checksum, const char *path,
+generator_load_old_file (BulkGenerator *self, const char *checksum, const char *path,
                          StreamObject *out, gboolean *out_usable, GCancellable *cancellable,
                          GError **error)
 {
@@ -986,7 +984,7 @@ generator_load_old_file (StreamGenerator *self, const char *checksum, const char
 }
 
 static gboolean
-generator_load_metadata (StreamGenerator *self, OstreeObjectType objtype, const char *checksum,
+generator_load_metadata (BulkGenerator *self, OstreeObjectType objtype, const char *checksum,
                          const char *path, StreamObject *out, GError **error)
 {
   g_autoptr (GVariant) v = NULL;
@@ -1002,7 +1000,7 @@ generator_load_metadata (StreamGenerator *self, OstreeObjectType objtype, const 
 
 typedef struct
 {
-  StreamGenerator *gen;
+  BulkGenerator *gen;
   const char *name;
   guint part_index;
   GArray *new_objects;
@@ -1024,7 +1022,7 @@ emit_job_thread (gpointer data)
 }
 
 void
-_ostree_static_delta_stream_part_free (OstreeStaticDeltaStreamPart *part)
+_ostree_static_delta_bulk_part_free (OstreeStaticDeltaBulkPart *part)
 {
   if (part == NULL)
     return;
@@ -1034,19 +1032,18 @@ _ostree_static_delta_stream_part_free (OstreeStaticDeltaStreamPart *part)
 }
 
 gboolean
-_ostree_static_delta_stream_generate (OstreeRepo *repo, const char *from, const char *to,
-                                      const OstreeStaticDeltaStreamOptions *options, int parts_dfd,
-                                      GPtrArray *out_parts, GCancellable *cancellable,
-                                      GError **error)
+_ostree_static_delta_bulk_generate (OstreeRepo *repo, const char *from, const char *to,
+                                    const OstreeStaticDeltaBulkOptions *options, int parts_dfd,
+                                    GPtrArray *out_parts, GCancellable *cancellable, GError **error)
 {
-  GLNX_AUTO_PREFIX_ERROR ("Generating stream delta", error);
+  GLNX_AUTO_PREFIX_ERROR ("Generating bulk delta", error);
 
-  StreamGenerator gen = {
+  BulkGenerator gen = {
     0,
   };
   gen.repo = repo;
   gen.options = options;
-  gen.effort = &effort_table[MIN (options->effort, OSTREE_STATIC_DELTA_STREAM_EFFORT_MAX)];
+  gen.effort = &effort_table[MIN (options->effort, OSTREE_STATIC_DELTA_BULK_EFFORT_MAX)];
   gen.threads = options->threads > 0 ? options->threads : g_get_num_processors ();
   gen.parts_dfd = parts_dfd;
   gen.out_parts = out_parts;
@@ -1213,8 +1210,8 @@ _ostree_static_delta_stream_generate (OstreeRepo *repo, const char *from, const 
   g_array_sort (add_old, stream_object_compare);
 
   if (options->verbose)
-    g_printerr ("stream delta: effort=%u threads=%u scan=%.2fs\n",
-                MIN (options->effort, OSTREE_STATIC_DELTA_STREAM_EFFORT_MAX), gen.threads,
+    g_printerr ("bulk delta: effort=%u threads=%u scan=%.2fs\n",
+                MIN (options->effort, OSTREE_STATIC_DELTA_BULK_EFFORT_MAX), gen.threads,
                 (g_get_monotonic_time () - start_time) / (double)G_USEC_PER_SEC);
 
   {
@@ -1232,7 +1229,7 @@ _ostree_static_delta_stream_generate (OstreeRepo *repo, const char *from, const 
           continue;
         jobs[n_jobs] = jobs[j];
         jobs[n_jobs].part_index = out_parts->len;
-        g_ptr_array_add (out_parts, g_new0 (OstreeStaticDeltaStreamPart, 1));
+        g_ptr_array_add (out_parts, g_new0 (OstreeStaticDeltaBulkPart, 1));
         n_jobs++;
       }
 
@@ -1241,7 +1238,7 @@ _ostree_static_delta_stream_generate (OstreeRepo *repo, const char *from, const 
      */
     GThread *thread = NULL;
     if (n_jobs == 2 && gen.bare)
-      thread = g_thread_new ("ostree-stream-delta", emit_job_thread, &jobs[1]);
+      thread = g_thread_new ("ostree-bulk-delta", emit_job_thread, &jobs[1]);
     gboolean ok = TRUE;
     for (guint j = 0; j < n_jobs; j++)
       {
@@ -1283,10 +1280,10 @@ typedef struct
   const guint8 *data;
   gsize data_len;
   GVariant *header;
-} StreamPart;
+} BulkPart;
 
 static void
-stream_part_clear (StreamPart *self)
+bulk_part_clear (BulkPart *self)
 {
   g_clear_pointer (&self->sources, g_variant_unref);
   g_clear_pointer (&self->modes, g_variant_unref);
@@ -1294,23 +1291,23 @@ stream_part_clear (StreamPart *self)
   g_clear_pointer (&self->entries, g_variant_unref);
   g_clear_pointer (&self->header, g_variant_unref);
 }
-G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (StreamPart, stream_part_clear)
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (BulkPart, bulk_part_clear)
 
 /* @part is the "ay" variant produced by _ostree_static_delta_part_open() */
 static gboolean
-stream_part_parse (GVariant *part, StreamPart *out, GError **error)
+bulk_part_parse (GVariant *part, BulkPart *out, GError **error)
 {
   gsize len;
   const guint8 *data = g_variant_get_fixed_array (part, &len, 1);
   guint64 header_len;
   const gsize prefix_len = 1 + sizeof (header_len);
   if (len < prefix_len)
-    return glnx_throw (error, "Truncated stream delta part");
+    return glnx_throw (error, "Truncated bulk delta part");
   const guint8 header_compression = data[0];
   memcpy (&header_len, data + 1, sizeof (header_len));
   header_len = GUINT64_FROM_LE (header_len);
   if (header_len > len - prefix_len)
-    return glnx_throw (error, "Invalid stream delta part header length");
+    return glnx_throw (error, "Invalid bulk delta part header length");
 
   g_autoptr (GBytes) header_bytes = NULL;
   {
@@ -1324,11 +1321,11 @@ stream_part_parse (GVariant *part, StreamPart *out, GError **error)
         const gsize chunk = 64 * 1024;
         const guint old_len = buf->len;
         if (old_len > MAX_HEADER_SIZE)
-          return glnx_throw (error, "Stream delta part header is too large");
+          return glnx_throw (error, "Bulk delta part header is too large");
         g_byte_array_set_size (buf, old_len + chunk);
         gsize n;
         if (!_ostree_delta_decompressor_read (decompressor, buf->data + old_len, chunk, &n, error))
-          return glnx_prefix_error (error, "Reading stream delta part header");
+          return glnx_prefix_error (error, "Reading bulk delta part header");
         g_byte_array_set_size (buf, old_len + n);
         if (n < chunk)
           break;
@@ -1336,9 +1333,9 @@ stream_part_parse (GVariant *part, StreamPart *out, GError **error)
     header_bytes = g_byte_array_free_to_bytes (g_steal_pointer (&buf));
   }
   out->header = g_variant_ref_sink (g_variant_new_from_bytes (
-      G_VARIANT_TYPE (OSTREE_STATIC_DELTA_STREAM_HEADER_FORMAT), header_bytes, FALSE));
+      G_VARIANT_TYPE (OSTREE_STATIC_DELTA_BULK_HEADER_FORMAT), header_bytes, FALSE));
   if (!g_variant_is_normal_form (out->header))
-    return glnx_throw (error, "Invalid stream delta part header");
+    return glnx_throw (error, "Invalid bulk delta part header");
 
   g_variant_get (out->header, "(yytt@ay@a(uuu)@aa(ayay)@a(uut))", &out->compression, &out->kind,
                  &out->new_size, &out->data_size, &out->sources, &out->modes, &out->xattrs,
@@ -1348,31 +1345,31 @@ stream_part_parse (GVariant *part, StreamPart *out, GError **error)
   out->data = data + prefix_len + header_len;
   out->data_len = len - prefix_len - header_len;
 
-  if (out->kind != OSTREE_STATIC_DELTA_STREAM_KIND_RAW
-      && out->kind != OSTREE_STATIC_DELTA_STREAM_KIND_HDIFF)
-    return glnx_throw (error, "Unknown stream delta part kind %u", out->kind);
+  if (out->kind != OSTREE_STATIC_DELTA_BULK_KIND_RAW
+      && out->kind != OSTREE_STATIC_DELTA_BULK_KIND_HDIFF)
+    return glnx_throw (error, "Unknown bulk delta part kind %u", out->kind);
   if (g_variant_get_size (out->sources) % OBJ_NAME_LEN != 0)
-    return glnx_throw (error, "Invalid stream delta part source list");
+    return glnx_throw (error, "Invalid bulk delta part source list");
   return TRUE;
 }
 
 gboolean
-_ostree_static_delta_stream_part_describe (GVariant *part, char **out_description, GError **error)
+_ostree_static_delta_bulk_part_describe (GVariant *part, char **out_description, GError **error)
 {
-  g_auto (StreamPart) parsed = {
+  g_auto (BulkPart) parsed = {
     0,
   };
-  if (!stream_part_parse (part, &parsed, error))
+  if (!bulk_part_parse (part, &parsed, error))
     return FALSE;
   const char *comp
       = parsed.compression == OSTREE_STATIC_DELTA_COMPRESSION_ZSTD
             ? "zstd"
             : (parsed.compression == OSTREE_STATIC_DELTA_COMPRESSION_XZ ? "xz" : "none");
   *out_description = g_strdup_printf (
-      "stream kind=%s compression=%s objects=%" G_GSIZE_FORMAT " sources=%" G_GSIZE_FORMAT
+      "bulk kind=%s compression=%s objects=%" G_GSIZE_FORMAT " sources=%" G_GSIZE_FORMAT
       " newsize=%" G_GUINT64_FORMAT " datasize=%" G_GUINT64_FORMAT
       " compressedsize=%" G_GSIZE_FORMAT,
-      parsed.kind == OSTREE_STATIC_DELTA_STREAM_KIND_HDIFF ? "hdiff" : "raw", comp,
+      parsed.kind == OSTREE_STATIC_DELTA_BULK_KIND_HDIFF ? "hdiff" : "raw", comp,
       g_variant_n_children (parsed.entries), g_variant_get_size (parsed.sources) / OBJ_NAME_LEN,
       parsed.new_size, parsed.data_size, parsed.data_len);
   return TRUE;
@@ -1382,7 +1379,7 @@ typedef struct
 {
   OstreeRepo *repo;
   GCancellable *cancellable;
-  StreamPart *part;
+  BulkPart *part;
   const guint8 *object_names;
   guint n_objects;
 
@@ -1440,7 +1437,7 @@ stream_sink_begin_object (StreamSink *self, GError **error)
     {
       if (self->objtype != OSTREE_OBJECT_TYPE_DIR_TREE
           && self->objtype != OSTREE_OBJECT_TYPE_DIR_META)
-        return glnx_throw (error, "Unexpected object type %u in stream delta part", self->objtype);
+        return glnx_throw (error, "Unexpected object type %u in bulk delta part", self->objtype);
       if (self->size > OSTREE_MAX_METADATA_SIZE)
         return glnx_throw (error, "Metadata object %s is too large", self->checksum);
       if (!self->have_obj)
@@ -1449,9 +1446,9 @@ stream_sink_begin_object (StreamSink *self, GError **error)
     }
 
   if (mode_index >= g_variant_n_children (self->part->modes))
-    return glnx_throw (error, "Stream delta mode index %u out of range", mode_index);
+    return glnx_throw (error, "Bulk delta mode index %u out of range", mode_index);
   if (xattr_index >= g_variant_n_children (self->part->xattrs))
-    return glnx_throw (error, "Stream delta xattr index %u out of range", xattr_index);
+    return glnx_throw (error, "Bulk delta xattr index %u out of range", xattr_index);
   g_variant_get_child (self->part->modes, mode_index, "(uuu)", &self->uid, &self->gid, &self->mode);
   self->uid = GUINT32_FROM_BE (self->uid);
   self->gid = GUINT32_FROM_BE (self->gid);
@@ -1553,7 +1550,7 @@ stream_sink_write_inner (StreamSink *self, const guint8 *buf, gsize len, GError 
       if (!stream_sink_advance (self, error))
         return FALSE;
       if (self->index >= self->n_objects)
-        return glnx_throw (error, "Stream delta part has trailing data");
+        return glnx_throw (error, "Bulk delta part has trailing data");
 
       const gsize n = MIN ((guint64)len, self->size - self->written);
       if (self->have_obj)
@@ -1611,16 +1608,16 @@ diff_reader_read (gpointer user_data, guint64 pos, guint8 *buf, gsize len)
 }
 
 gboolean
-_ostree_static_delta_stream_part_execute (OstreeRepo *repo, GVariant *objects, GVariant *part,
-                                          gboolean stats_only, GCancellable *cancellable,
-                                          GError **error)
+_ostree_static_delta_bulk_part_execute (OstreeRepo *repo, GVariant *objects, GVariant *part,
+                                        gboolean stats_only, GCancellable *cancellable,
+                                        GError **error)
 {
-  GLNX_AUTO_PREFIX_ERROR ("Executing stream delta part", error);
+  GLNX_AUTO_PREFIX_ERROR ("Executing bulk delta part", error);
 
-  g_auto (StreamPart) parsed = {
+  g_auto (BulkPart) parsed = {
     0,
   };
-  if (!stream_part_parse (part, &parsed, error))
+  if (!bulk_part_parse (part, &parsed, error))
     return FALSE;
 
   guint8 *object_names;
@@ -1628,8 +1625,7 @@ _ostree_static_delta_stream_part_execute (OstreeRepo *repo, GVariant *objects, G
   if (!_ostree_static_delta_parse_checksum_array (objects, &object_names, &n_objects, error))
     return FALSE;
   if (g_variant_n_children (parsed.entries) != n_objects)
-    return glnx_throw (error,
-                       "Stream delta part describes %" G_GSIZE_FORMAT " objects, expected %u",
+    return glnx_throw (error, "Bulk delta part describes %" G_GSIZE_FORMAT " objects, expected %u",
                        g_variant_n_children (parsed.entries), n_objects);
   {
     guint64 total = 0;
@@ -1639,18 +1635,18 @@ _ostree_static_delta_stream_part_execute (OstreeRepo *repo, GVariant *objects, G
         g_variant_get_child (parsed.entries, i, "(uut)", NULL, NULL, &size);
         size = GUINT64_FROM_LE (size);
         if (size > G_MAXUINT64 - total)
-          return glnx_throw (error, "Invalid object sizes in stream delta part");
+          return glnx_throw (error, "Invalid object sizes in bulk delta part");
         total += size;
       }
     if (total != parsed.new_size)
-      return glnx_throw (error, "Object sizes in stream delta part do not add up");
+      return glnx_throw (error, "Object sizes in bulk delta part do not add up");
   }
 
   if (stats_only)
     return TRUE;
 
   if (!_ostree_repo_mode_is_bare (ostree_repo_get_mode (repo)))
-    return glnx_throw (error, "Stream deltas can only be applied to bare repositories");
+    return glnx_throw (error, "Bulk deltas can only be applied to bare repositories");
 
   g_auto (StreamSink) sink = {
     0,
@@ -1666,7 +1662,7 @@ _ostree_static_delta_stream_part_execute (OstreeRepo *repo, GVariant *objects, G
   if (!decompressor)
     return FALSE;
 
-  if (parsed.kind == OSTREE_STATIC_DELTA_STREAM_KIND_RAW)
+  if (parsed.kind == OSTREE_STATIC_DELTA_BULK_KIND_RAW)
     {
       g_autofree guint8 *buf = g_malloc (IO_BUF_SIZE);
       guint64 remaining = parsed.new_size;
@@ -1677,7 +1673,7 @@ _ostree_static_delta_stream_part_execute (OstreeRepo *repo, GVariant *objects, G
                                                 error))
             return FALSE;
           if (n == 0)
-            return glnx_throw (error, "Truncated stream delta part");
+            return glnx_throw (error, "Truncated bulk delta part");
           if (!stream_sink_write_inner (&sink, buf, n, error))
             return FALSE;
           remaining -= n;
@@ -1747,7 +1743,7 @@ _ostree_static_delta_stream_part_execute (OstreeRepo *repo, GVariant *objects, G
   if (!stream_sink_advance (&sink, error))
     return FALSE;
   if (sink.index != n_objects)
-    return glnx_throw (error, "Stream delta part ended early");
+    return glnx_throw (error, "Bulk delta part ended early");
 
   return TRUE;
 }

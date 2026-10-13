@@ -21,7 +21,7 @@
 
 G_BEGIN_DECLS
 
-/* Streaming, optionally multi-threaded compression for stream delta parts.
+/* Streaming, optionally multi-threaded compression for bulk delta parts.
  * Unlike the GConverter based compressors this never needs the whole input
  * or output in memory, and lets the caller pick the speed/size tradeoff.
  */
