@@ -210,9 +210,13 @@ cleanly on the unknown instruction or compression type.
    produces slightly smaller parts, and is not subject to
    `--max-bsdiff-size`.
  - `--compression=zstd[:LEVEL]` compresses delta parts with zstd
-   instead of xz.  Generating a `from NULL` delta is almost entirely
+   instead of xz (`--compression=xz:LEVEL` selects an xz preset).  Generating a `from NULL` delta is almost entirely
    compression; zstd makes that an order of magnitude faster at the
    cost of deltas around a third larger.
+
+Independently of these, `--threads=N` compresses several delta parts
+at once.  The delta produced is identical; only the time and memory
+needed to generate it change.
 
 ## Bulk deltas
 

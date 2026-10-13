@@ -201,10 +201,14 @@ _ostree_hdiff_create_block (const OtHdiffInput *old_in, const OtHdiffInput *new_
       hdiff_private::TVectorAsStreamOutput out_stream (diff);
       /* Our inputs are not safe for concurrent use; HDiffPatch then locks */
       const hdiff_TMTSets_s mtsets = { threads, threads, false, false };
-      create_single_compressed_diff_block (&new_stream, &old_stream, &out_stream, NULL,
-                                           OT_HDIFF_STEP_MEM,
-                                           MAX (options->fast_match_block, kMatchBlockSize_min),
-                                           options->match_score, options->big_cache, &mtsets);
+      const size_t block = MAX (options->fast_match_block, kMatchBlockSize_min);
+      if (options->legacy_format)
+        create_compressed_diff_block (&new_stream, &old_stream, &out_stream, NULL, block,
+                                      options->match_score, options->big_cache, &mtsets);
+      else
+        create_single_compressed_diff_block (&new_stream, &old_stream, &out_stream, NULL,
+                                             OT_HDIFF_STEP_MEM, block, options->match_score,
+                                             options->big_cache, &mtsets);
       *out_diff = g_bytes_new (diff.data (), diff.size ());
     }
   catch (const std::exception &e)
@@ -291,6 +295,21 @@ gboolean
 _ostree_hdiff_patch_mem (const guint8 *old_data, gsize old_len, const guint8 *diff, gsize diff_len,
                          guint8 *out_new, gsize new_len, GError **error)
 {
+  /* The older format; see OtHdiffMemOptions.legacy_format */
+  if (diff_len >= 7 && memcmp (diff, "HDIFF13", 7) == 0)
+    {
+      hpatch_compressedDiffInfo info;
+      if (!getCompressedDiffInfo_mem (&info, diff, diff + diff_len) || info.newDataSize != new_len
+          || info.oldDataSize != old_len || info.compressedCount != 0
+          || !patch_decompress_mem (out_new, out_new + new_len, old_data, old_data + old_len, diff,
+                                    diff + diff_len, NULL))
+        {
+          g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA, "hdiff patch failed");
+          return FALSE;
+        }
+      return TRUE;
+    }
+
   PatchListener listener;
   listener_init (&listener, new_len, old_len);
   hpatch_BOOL ok = patch_single_stream_mem (&listener.base, out_new, out_new + new_len, old_data,

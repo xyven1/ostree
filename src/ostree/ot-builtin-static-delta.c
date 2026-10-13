@@ -99,14 +99,14 @@ static GOptionEntry generate_options[] = {
     "5",
     "N" },
   { "threads", 0, 0, G_OPTION_ARG_STRING, &opt_threads,
-    "With --bulk: number of threads (default: one per processor)", "N" },
+    "Number of threads (default: one per processor with --bulk, otherwise 1)", "N" },
   { "file-delta", 0, 0, G_OPTION_ARG_STRING, &opt_file_delta,
-    "Per-file delta algorithm: bsdiff (default) or hdiff (much faster to generate; needs an ostree "
-    "with hdiffpatch support to apply)",
+    "Per-file delta algorithm: bsdiff (default) or hdiff[:BLOCKSIZE] (much faster to generate; "
+    "needs an ostree with hdiffpatch support to apply)",
     "ALGO" },
   { "compression", 0, 0, G_OPTION_ARG_STRING, &opt_compression,
-    "Delta part compression: xz (default) or zstd[:LEVEL] (much faster; needs an ostree with zstd "
-    "support to apply)",
+    "Delta part compression: xz[:LEVEL] (default, level 8) or zstd[:LEVEL] (much faster; needs "
+    "an ostree with zstd support to apply)",
     "TYPE" },
   { "if-not-exists", 'n', 0, G_OPTION_ARG_NONE, &opt_if_not_exists,
     "Only generate if a delta does not already exist", NULL },
@@ -431,8 +431,8 @@ ot_static_delta_builtin_generate (int argc, char **argv, OstreeCommandInvocation
                                g_variant_new_boolean (FALSE));
       if (opt_bulk)
         g_variant_builder_add (parambuilder, "{sv}", "bulk", g_variant_new_boolean (TRUE));
-      else if (opt_effort || opt_threads)
-        return glnx_throw (error, "--effort and --threads require --bulk");
+      else if (opt_effort)
+        return glnx_throw (error, "--effort requires --bulk");
       if (opt_effort)
         g_variant_builder_add (parambuilder, "{sv}", "effort",
                                g_variant_new_uint32 (g_ascii_strtoull (opt_effort, NULL, 10)));
@@ -440,8 +440,26 @@ ot_static_delta_builtin_generate (int argc, char **argv, OstreeCommandInvocation
         g_variant_builder_add (parambuilder, "{sv}", "threads",
                                g_variant_new_uint32 (g_ascii_strtoull (opt_threads, NULL, 10)));
       if (opt_file_delta)
-        g_variant_builder_add (parambuilder, "{sv}", "file-delta",
-                               g_variant_new_string (opt_file_delta));
+        {
+          /* ALGO or ALGO:BLOCKSIZE, with an optional k or m suffix */
+          g_auto (GStrv) parts = g_strsplit (opt_file_delta, ":", 2);
+          g_variant_builder_add (parambuilder, "{sv}", "file-delta",
+                                 g_variant_new_string (parts[0] ? parts[0] : ""));
+          if (parts[0] != NULL && parts[1] != NULL)
+            {
+              char *end = NULL;
+              guint64 size = g_ascii_strtoull (parts[1], &end, 10);
+              if (end != parts[1] && (*end == 'k' || *end == 'K'))
+                size *= 1024, end++;
+              else if (end != parts[1] && (*end == 'm' || *end == 'M'))
+                size *= 1024 * 1024, end++;
+              if (g_strcmp0 (parts[0], "hdiff") != 0 || end == parts[1] || *end != '\0'
+                  || size < 4 || size > 64 * 1024 * 1024)
+                return glnx_throw (error, "Invalid --file-delta '%s'", opt_file_delta);
+              g_variant_builder_add (parambuilder, "{sv}", "hdiff-block-size",
+                                     g_variant_new_uint32 ((guint32)size));
+            }
+        }
       if (opt_compression)
         {
           g_auto (GStrv) parts = g_strsplit (opt_compression, ":", 2);
@@ -461,7 +479,8 @@ ot_static_delta_builtin_generate (int argc, char **argv, OstreeCommandInvocation
             {
               char *end = NULL;
               gint64 level = g_ascii_strtoll (parts[1], &end, 10);
-              if (type != 'z' || end == parts[1] || *end != '\0' || level < -100 || level > 22)
+              if (end == parts[1] || *end != '\0' || (type == 'z' && (level < -100 || level > 22))
+                  || (type == 'x' && (level < 0 || level > 9)))
                 {
                   g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
                                "Invalid compression level in '%s'", opt_compression);

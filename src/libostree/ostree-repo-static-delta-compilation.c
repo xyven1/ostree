@@ -91,6 +91,15 @@ typedef struct
   int compression_level;
   /* Use HDiffPatch rather than bsdiff for per-file deltas */
   gboolean use_hdiff;
+  /* Block size of the hdiff pre-match; 0 for the default */
+  guint hdiff_block_size;
+  /* Parts are compressed on this many threads */
+  guint threads;
+  GThreadPool *finish_pool;
+  GMutex finish_lock;
+  GCond finish_cond;
+  guint finish_in_flight;
+  GError *finish_error;
   gboolean swap_endian;
   int parts_dfd;
   DeltaOpts delta_opts;
@@ -228,10 +237,13 @@ xattr_chunk_equals (const void *one, const void *two)
   return memcmp (g_variant_get_data (v1), g_variant_get_data (v2), l1) == 0;
 }
 
+/* Compress and write out a completed part.  May run on a worker thread: it
+ * only reads from @builder.
+ */
 static gboolean
-finish_part (OstreeStaticDeltaBuilder *builder, GError **error)
+finish_part_sync (OstreeStaticDeltaBuilder *builder, OstreeStaticDeltaPartBuilder *part_builder,
+                  guint part_number, GError **error)
 {
-  OstreeStaticDeltaPartBuilder *part_builder = builder->parts->pdata[builder->parts->len - 1];
   g_autofree guchar *part_checksum = NULL;
   g_autoptr (GBytes) objtype_checksum_array = NULL;
   g_autoptr (GBytes) checksum_bytes = NULL;
@@ -274,7 +286,18 @@ finish_part (OstreeStaticDeltaBuilder *builder, GError **error)
   switch (builder->compression)
     {
     case OSTREE_STATIC_DELTA_COMPRESSION_XZ:
-      compressor = (GConverter *)_ostree_lzma_compressor_new (NULL);
+      {
+        g_autoptr (GVariant) lzma_params = NULL;
+        if (builder->compression_level >= 0)
+          {
+            g_auto (GVariantBuilder) params_builder = OT_VARIANT_BUILDER_INITIALIZER;
+            g_variant_builder_init (&params_builder, G_VARIANT_TYPE ("a{sv}"));
+            g_variant_builder_add (&params_builder, "{sv}", "level",
+                                   g_variant_new_int32 (builder->compression_level));
+            lzma_params = g_variant_ref_sink (g_variant_builder_end (&params_builder));
+          }
+        compressor = (GConverter *)_ostree_lzma_compressor_new (lzma_params);
+      }
       break;
 #ifdef HAVE_ZSTD
     case OSTREE_STATIC_DELTA_COMPRESSION_ZSTD:
@@ -332,10 +355,101 @@ finish_part (OstreeStaticDeltaBuilder *builder, GError **error)
     {
       g_printerr ("part %u n:%u compressed:%" G_GUINT64_FORMAT " uncompressed:%" G_GUINT64_FORMAT
                   "\n",
-                  builder->parts->len, part_builder->objects->len, part_builder->compressed_size,
+                  part_number, part_builder->objects->len, part_builder->compressed_size,
                   part_builder->uncompressed_size);
     }
 
+  return TRUE;
+}
+
+typedef struct
+{
+  OstreeStaticDeltaPartBuilder *part_builder;
+  guint part_number;
+} FinishPartJob;
+
+static void
+finish_part_thread (gpointer data, gpointer user_data)
+{
+  g_autofree FinishPartJob *job = data;
+  OstreeStaticDeltaBuilder *builder = user_data;
+  g_autoptr (GError) local_error = NULL;
+  gboolean ok = finish_part_sync (builder, job->part_builder, job->part_number, &local_error);
+
+  g_mutex_lock (&builder->finish_lock);
+  if (!ok && builder->finish_error == NULL)
+    builder->finish_error = g_steal_pointer (&local_error);
+  builder->finish_in_flight--;
+  g_cond_broadcast (&builder->finish_cond);
+  g_mutex_unlock (&builder->finish_lock);
+}
+
+/* Finish the most recently allocated part.  With more than one thread the
+ * compression happens in the background; finish_parts_wait() collects it.
+ */
+static gboolean
+finish_part (OstreeStaticDeltaBuilder *builder, GError **error)
+{
+  OstreeStaticDeltaPartBuilder *part_builder = builder->parts->pdata[builder->parts->len - 1];
+  const guint part_number = builder->parts->len;
+
+  if (builder->threads <= 1)
+    return finish_part_sync (builder, part_builder, part_number, error);
+
+  if (builder->finish_pool == NULL)
+    {
+      builder->finish_pool
+          = g_thread_pool_new (finish_part_thread, builder, builder->threads, FALSE, error);
+      if (builder->finish_pool == NULL)
+        return FALSE;
+    }
+
+  /* Uncompressed parts are held in memory until a worker gets to them, so
+   * don't let the object scan run far ahead of the compressors.
+   */
+  g_mutex_lock (&builder->finish_lock);
+  while (builder->finish_in_flight >= builder->threads * 2 && builder->finish_error == NULL)
+    g_cond_wait (&builder->finish_cond, &builder->finish_lock);
+  const gboolean failed = builder->finish_error != NULL;
+  if (!failed)
+    builder->finish_in_flight++;
+  g_mutex_unlock (&builder->finish_lock);
+  if (failed)
+    return TRUE; /* reported by finish_parts_wait() */
+
+  FinishPartJob *job = g_new0 (FinishPartJob, 1);
+  job->part_builder = part_builder;
+  job->part_number = part_number;
+  if (!g_thread_pool_push (builder->finish_pool, job, error))
+    {
+      g_free (job);
+      g_mutex_lock (&builder->finish_lock);
+      builder->finish_in_flight--;
+      g_mutex_unlock (&builder->finish_lock);
+      return FALSE;
+    }
+  return TRUE;
+}
+
+/* Wait for all background part compression; must be called before the
+ * parts are used or the builder goes away, whether or not generation failed.
+ */
+static gboolean
+finish_parts_wait (OstreeStaticDeltaBuilder *builder, GError **error)
+{
+  if (builder->finish_pool != NULL)
+    {
+      g_thread_pool_free (builder->finish_pool, FALSE, TRUE);
+      builder->finish_pool = NULL;
+    }
+  if (builder->finish_error != NULL)
+    {
+      if (error != NULL && *error == NULL)
+        g_propagate_error (error, g_steal_pointer (&builder->finish_error));
+      else
+        g_clear_error (&builder->finish_error);
+      return FALSE;
+    }
   return TRUE;
 }
 
@@ -885,8 +999,13 @@ process_one_bsdiff (OstreeRepo *repo, OstreeStaticDeltaBuilder *builder,
     if (builder->use_hdiff)
       {
         g_autoptr (GBytes) diff = NULL;
-        if (!_ostree_hdiff_create_mem (tmp_from_buf, tmp_from_len, tmp_to_buf, tmp_to_len, NULL,
-                                       &diff, error))
+        OtHdiffMemOptions hdiff_opts = OT_HDIFF_MEM_OPTIONS_DEFAULT;
+        if (builder->hdiff_block_size > 0)
+          hdiff_opts.fast_match_block = builder->hdiff_block_size;
+        /* Benchmarking aid, not a supported interface */
+        hdiff_opts.legacy_format = g_getenv ("OSTREE_BENCH_HDIFF_LEGACY_FORMAT") != NULL;
+        if (!_ostree_hdiff_create_mem (tmp_from_buf, tmp_from_len, tmp_to_buf, tmp_to_len,
+                                       &hdiff_opts, &diff, error))
           return FALSE;
 
         g_string_append_c (current_part->operations, (gchar)OSTREE_STATIC_DELTA_OP_HPATCH);
@@ -1318,7 +1437,10 @@ get_fallback_headers (OstreeRepo *self, OstreeStaticDeltaBuilder *builder, GVari
  *   for input files
  *   - compression: y: Compression type for delta parts: x=lzma (default), z=zstd.  Deltas
  * using zstd cannot be applied by versions of ostree without zstd support.
- *   - compression-level: i: Compression level; currently only used for zstd.  Default 10.
+ *   - compression-level: i: Compression level: an xz preset from 0 to 9 (default 8), or a
+ * zstd level (default 10).
+ *   - hdiff-block-size: u: With file-delta=hdiff, the size in bytes of the blocks matched before
+ * the precise match.  Larger is slower and slightly smaller.  Default 1024.
  *   - bulk: b: Generate a "bulk" delta: instead of per-file deltas, whole groups of
  * objects (including directory metadata) are diffed against each other with HDiffPatch.  Far
  * faster and smaller than the default scheme.  Bulk deltas never contain fallback objects
@@ -1327,8 +1449,9 @@ get_fallback_headers (OstreeRepo *self, OstreeStaticDeltaBuilder *builder, GVari
  * and apply, and can only be applied to bare repositories.  Default FALSE.
  *   - effort: u: For bulk deltas, from 0 (fastest generation; for tight development loops)
  * to 9 (smallest result; for expensive links).  Efforts 0-4 use zstd, 5-9 xz.  Default 5.
- *   - threads: u: For bulk deltas, the number of threads to use; 0 (the default) uses one
- * per processor.
+ *   - threads: u: The number of threads to use.  Bulk deltas default to one per processor (0).
+ * Otherwise the default is 1, and more threads compress several delta parts at once; the
+ * resulting delta is the same.
  *   - file-delta: s: Per-file delta algorithm: "bsdiff" (default) or "hdiff".  hdiff is
  * around 100x faster to generate, is not subject to max-bsdiff-size, and cannot be applied
  * by versions of ostree without hdiffpatch support.
@@ -1454,9 +1577,23 @@ ostree_repo_static_delta_generate (OstreeRepo *self, OstreeStaticDeltaGenerateOp
 
     gint32 level;
     if (!g_variant_lookup (params, "compression-level", "i", &level))
-      level = OSTREE_STATIC_DELTA_ZSTD_DEFAULT_LEVEL;
+      level = compression == OSTREE_STATIC_DELTA_COMPRESSION_ZSTD
+                  ? OSTREE_STATIC_DELTA_ZSTD_DEFAULT_LEVEL
+                  : -1 /* the xz compressor's default */;
+    else if (compression == OSTREE_STATIC_DELTA_COMPRESSION_XZ && (level < 0 || level > 9))
+      return glnx_throw (error, "Invalid 'compression-level' parameter %d for xz", level);
     builder.compression_level = level;
   }
+
+  if (!g_variant_lookup (params, "hdiff-block-size", "u", &builder.hdiff_block_size))
+    builder.hdiff_block_size = 0;
+
+  /* Unlike bulk deltas, the classic scheme defaults to a single thread:
+   * each xz encoder can need several hundred MiB.
+   */
+  builder.threads = bulk_options.threads > 0 ? bulk_options.threads : 1;
+  g_mutex_init (&builder.finish_lock);
+  g_cond_init (&builder.finish_cond);
 
   {
     gboolean verbose;
@@ -1537,8 +1674,15 @@ ostree_repo_static_delta_generate (OstreeRepo *self, OstreeStaticDeltaGenerateOp
         }
     }
   /* Ignore optimization flags */
-  else if (!generate_delta_lowlatency (self, from, to, delta_opts, &builder, cancellable, error))
-    return FALSE;
+  else
+    {
+      gboolean ok
+          = generate_delta_lowlatency (self, from, to, delta_opts, &builder, cancellable, error);
+      if (!finish_parts_wait (&builder, error))
+        ok = FALSE;
+      if (!ok)
+        return FALSE;
+    }
 
   if (!glnx_open_tmpfile_linkable_at (descriptor_dfd, ".", O_RDWR | O_CLOEXEC, &descriptor_tmpf,
                                       error))

@@ -81,7 +81,7 @@ _ostree_lzma_compressor_set_property (GObject *object, guint prop_id, const GVal
   switch (prop_id)
     {
     case PROP_PARAMS:
-      self->params = g_value_get_variant (value);
+      self->params = g_value_dup_variant (value);
       break;
 
     default:
@@ -167,7 +167,11 @@ _ostree_lzma_compressor_convert (GConverter *converter, const void *inbuf, gsize
 
   if (!self->initialized)
     {
-      res = lzma_easy_encoder (&self->lstream, 8, LZMA_CHECK_CRC64);
+      /* The preset can be chosen with an "level" (i) entry in params */
+      gint32 level = 8;
+      if (self->params != NULL)
+        (void)g_variant_lookup (self->params, "level", "i", &level);
+      res = lzma_easy_encoder (&self->lstream, (uint32_t)CLAMP (level, 0, 9), LZMA_CHECK_CRC64);
       if (res != LZMA_OK)
         return _ostree_lzma_return (res, error);
       self->initialized = TRUE;

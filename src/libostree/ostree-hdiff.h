@@ -54,9 +54,14 @@ typedef struct
   /* Trade memory (O(old size)) for speed in the suffix-array match. */
   gboolean big_cache;
   guint threads;
+  /* Emit HDiffPatch's older "compressed diff" format (HDIFF13) rather than
+   * the single-stream one.  Only for comparing the two; patching it needs the
+   * whole diff in memory.
+   */
+  gboolean legacy_format;
 } OtHdiffMemOptions;
 
-#define OT_HDIFF_MEM_OPTIONS_DEFAULT { 1024, 6, FALSE, 1 }
+#define OT_HDIFF_MEM_OPTIONS_DEFAULT { 1024, 6, FALSE, 1, FALSE }
 
 /* Precise differ: loads what it needs of both inputs into memory (in the
  * worst case all of both, plus working space of several times the old size).

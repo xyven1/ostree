@@ -132,8 +132,10 @@ License along with this library. If not, see <https://www.gnu.org/licenses/>.
                 <term><option>--threads</option>=N</term>
 
                 <listitem><para>
-                    With <option>--bulk</option>, the number of threads to use.  The default
-                    is one per processor.
+                    The number of threads to use.  With <option>--bulk</option> the default
+                    is one per processor.  Otherwise the default is 1; with more, several delta
+                    parts are compressed at once, which gives the same delta sooner at the cost
+                    of memory (an xz encoder can need several hundred megabytes).
                 </para></listitem>
             </varlistentry>
 
@@ -145,7 +147,9 @@ License along with this library. If not, see <https://www.gnu.org/licenses/>.
                     <literal>bsdiff</literal> (the default) or <literal>hdiff</literal>, which is
                     around a hundred times faster to generate and is not limited by
                     <option>--max-bsdiff-size</option>, but needs an ostree built with
-                    hdiffpatch support to apply.
+                    hdiffpatch support to apply.  <literal>hdiff</literal> may be followed by
+                    the size of the blocks it matches first, as in <literal>hdiff:64k</literal>
+                    (the default is 1k); larger is slower and slightly smaller.
                 </para></listitem>
             </varlistentry>
 
@@ -155,8 +159,8 @@ License along with this library. If not, see <https://www.gnu.org/licenses/>.
                 <listitem><para>
                     The compression of delta parts in the default scheme:
                     <literal>xz</literal> (the default) or <literal>zstd</literal>, optionally
-                    followed by a level as in <literal>zstd:3</literal> (the default level is
-                    10).  zstd is much faster to generate and apply, at the cost of larger
+                    followed by a level as in <literal>xz:6</literal> or
+                    <literal>zstd:3</literal> (the defaults are 8 for xz and 10 for zstd).  zstd is much faster to generate and apply, at the cost of larger
                     deltas, and needs an ostree built with zstd support to apply.
                 </para></listitem>
             </varlistentry>

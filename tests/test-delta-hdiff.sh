@@ -26,7 +26,7 @@ skip_without_user_xattrs
 skip_without_ostree_feature hdiffpatch
 skip_without_ostree_feature zstd
 
-echo '1..12'
+echo '1..14'
 
 # Deterministic pseudo-random data: compressible, but not trivially so
 gen_data() {
@@ -137,7 +137,7 @@ apply_and_check deltas/zstd-hdiff
 ${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} \
               --min-fallback-size=0 --filename=deltas/zstd-dir/superblock --compression=zstd:1
 apply_and_check deltas/zstd-dir/superblock
-for bad in lz4 zstd:abc zstd:99 xz:3; do
+for bad in lz4 zstd:abc zstd:99 xz:10 xz:abc; do
     if ${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} \
                      --compression=${bad} --filename=deltas/bad 2>err.txt; then
         assert_not_reached "--compression=${bad} unexpectedly succeeded"
@@ -252,6 +252,41 @@ for effort in 0 5; do
 done
 echo "ok damaged bulk delta"
 
+# xz presets and the hdiff block size
+for level in 0 9; do
+    ${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} \
+                  --min-fallback-size=0 --inline --filename=deltas/xz-${level} --compression=xz:${level}
+    apply_and_check deltas/xz-${level}
+done
+${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} \
+              --min-fallback-size=0 --inline --filename=deltas/hdiff-64k --file-delta=hdiff:64k
+apply_and_check deltas/hdiff-64k
+for bad in hdiff:1 hdiff:abc bsdiff:64k hdiff:1g; do
+    if ${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} \
+                     --file-delta=${bad} --filename=deltas/bad 2>err.txt; then
+        assert_not_reached "--file-delta=${bad} unexpectedly succeeded"
+    fi
+done
+echo "ok xz presets and hdiff block size"
+
+# Compressing parts on several threads gives exactly the same parts
+for variant in "--compression=xz" "--compression=zstd --file-delta=hdiff"; do
+    for threads in 1 4; do
+        rm -rf deltas/mt-${threads} && mkdir deltas/mt-${threads}
+        ${CMD_PREFIX} ostree --repo=repo static-delta generate --empty --to=${newrev} \
+                      --min-fallback-size=0 --max-chunk-size=1 ${variant} --threads=${threads} \
+                      --filename=deltas/mt-${threads}/superblock
+    done
+    assert_has_file deltas/mt-1/0
+    assert_has_file deltas/mt-1/1
+    for part in deltas/mt-1/[0-9]*; do
+        cmp ${part} deltas/mt-4/$(basename ${part})
+    done
+    test $(ls deltas/mt-1 | wc -l) = $(ls deltas/mt-4 | wc -l)
+    apply_and_check deltas/mt-4/superblock empty
+done
+echo "ok parallel part compression"
+
 # Option validation
 if ${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} \
                  --bulk --effort=10 --filename=deltas/bad 2>err.txt; then
@@ -262,5 +297,5 @@ if ${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to
                  --effort=3 --filename=deltas/bad 2>err.txt; then
     assert_not_reached "--effort without --bulk unexpectedly succeeded"
 fi
-assert_file_has_content err.txt "require --bulk"
+assert_file_has_content err.txt "requires --bulk"
 echo "ok option validation"
