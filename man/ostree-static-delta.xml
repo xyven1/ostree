@@ -99,6 +99,69 @@ License along with this library. If not, see <https://www.gnu.org/licenses/>.
             </varlistentry>
 
             <varlistentry>
+                <term><option>--stream</option></term>
+
+                <listitem><para>
+                    Generate a stream delta: rather than a delta per file, whole groups of
+                    objects, including directory metadata, are diffed against each other with
+                    HDiffPatch.  This is far faster to generate than the default scheme and
+                    produces much smaller deltas for updates.  Applying a stream delta needs an
+                    ostree built with hdiffpatch support, and a <literal>bare</literal>,
+                    <literal>bare-user</literal> or <literal>bare-user-only</literal> repository.
+                    The options <option>--min-fallback-size</option>,
+                    <option>--max-bsdiff-size</option>, <option>--max-chunk-size</option>,
+                    <option>--disable-bsdiff</option>, <option>--file-delta</option> and
+                    <option>--compression</option> have no effect on stream deltas.
+                </para></listitem>
+            </varlistentry>
+
+            <varlistentry>
+                <term><option>--effort</option>=N</term>
+
+                <listitem><para>
+                    With <option>--stream</option>, trade generation time for size: from
+                    <literal>0</literal>, as fast as possible (for development loops), to
+                    <literal>9</literal>, as small as possible (for expensive links).  Efforts
+                    0 to 4 compress with zstd, which is also several times faster to apply and
+                    needs an ostree built with zstd support; efforts 5 to 9 compress with xz.
+                    The default is <literal>5</literal>.
+                </para></listitem>
+            </varlistentry>
+
+            <varlistentry>
+                <term><option>--threads</option>=N</term>
+
+                <listitem><para>
+                    With <option>--stream</option>, the number of threads to use.  The default
+                    is one per processor.
+                </para></listitem>
+            </varlistentry>
+
+            <varlistentry>
+                <term><option>--file-delta</option>=ALGO</term>
+
+                <listitem><para>
+                    The per-file delta algorithm of the default scheme:
+                    <literal>bsdiff</literal> (the default) or <literal>hdiff</literal>, which is
+                    around a hundred times faster to generate and is not limited by
+                    <option>--max-bsdiff-size</option>, but needs an ostree built with
+                    hdiffpatch support to apply.
+                </para></listitem>
+            </varlistentry>
+
+            <varlistentry>
+                <term><option>--compression</option>=TYPE</term>
+
+                <listitem><para>
+                    The compression of delta parts in the default scheme:
+                    <literal>xz</literal> (the default) or <literal>zstd</literal>, optionally
+                    followed by a level as in <literal>zstd:3</literal> (the default level is
+                    10).  zstd is much faster to generate and apply, at the cost of larger
+                    deltas, and needs an ostree built with zstd support to apply.
+                </para></listitem>
+            </varlistentry>
+
+            <varlistentry>
                 <term><option>--max-usize</option>=SIZE</term>
 
                 <listitem><para>

@@ -195,6 +195,124 @@ hint for this - for example, files within a same package).
 A generated bsdiff is included in the payload blob, and applying it is
 an instruction.
 
+### hdiff and zstd
+
+Two optional variations of the above exist, selected when generating
+a delta.  Both need a client built with the corresponding support
+(`ostree --version` lists `hdiffpatch` and `zstd`); older clients fail
+cleanly on the unknown instruction or compression type.
+
+ - `--file-delta=hdiff` uses
+   [HDiffPatch](https://github.com/sisong/HDiffPatch) instead of bsdiff
+   for the per-file deltas.  bsdiff typically accounts for nearly all
+   of the time taken to generate a delta for an operating system
+   update; hdiff is around a hundred times faster on the same files,
+   produces slightly smaller parts, and is not subject to
+   `--max-bsdiff-size`.
+ - `--compression=zstd[:LEVEL]` compresses delta parts with zstd
+   instead of xz.  Generating a `from NULL` delta is almost entirely
+   compression; zstd makes that an order of magnitude faster at the
+   cost of deltas around a third larger.
+
+## Stream deltas
+
+`ostree static-delta generate --stream` produces a different kind of
+delta part.  Instead of a blob plus instructions and a delta per file,
+all of the objects of a part are concatenated into one *stream*:
+directory metadata objects first, then file content, each ordered by
+path.  The part then carries either that stream, compressed, or a
+single HDiffPatch diff that produces it from an *old* stream: the
+concatenation of a list of objects the client already has.
+
+Diffing whole groups of objects at once has three effects:
+
+ - Generation is fast.  One pass over the changed data replaces
+   thousands of per-file deltas, and identical regions are skipped at
+   over a gigabyte per second.
+ - Directory metadata is diffed too.  In the classic scheme new
+   `dirtree` objects are shipped whole, which for a small update is
+   often most of the delta.
+ - Files that moved are still matched.  Content is paired by group,
+   not by path, so a rebuilt binary inside a renamed directory (for
+   example one whose name contains a build hash) diffs against its
+   previous version.
+
+A stream delta has at most two parts, generated concurrently:
+
+ - The *modified* part holds the new metadata objects and the new
+   files whose basename matches a file that is gone from the target
+   commit.  It is diffed against the metadata and files that are gone,
+   using HDiffPatch's precise in-memory differ.  For an ordinary
+   update this part is the entire delta.
+ - The *new* part holds all other new files, diffed against old files
+   sharing a basename with HDiffPatch's low-memory block-matching
+   differ.  This is mostly content with nothing to diff against, so
+   its cost is compression.
+
+For a `from NULL` delta there is nothing to diff, and a single part
+simply holds the compressed stream.
+
+`--effort=N` chooses the tradeoff between generation time and size,
+from 0 (as fast as possible, for development loops) to 9 (as small as
+possible, for expensive links); the default is 5.  Efforts 0-4
+compress with zstd, which is also several times faster to apply;
+efforts 5-9 compress with xz.  Compression is multi-threaded; use
+`--threads` to limit it.  For an ordinary update the effort barely
+matters, since the diff is tiny either way; it matters when there is
+a lot of new content.
+
+When a stream part is applied, the old stream is read by random access
+directly from the repository's objects, the diff is decompressed as it
+is consumed, and each object is written out and checksummed as the new
+stream is produced.  Memory use is small and independent of the size
+of the delta.
+
+Stream deltas use the same superblock as other deltas, so signing,
+inline parts, `ostree pull` and `ostree static-delta apply-offline`
+all work unchanged.  Their limitations:
+
+ - They need a client built with hdiffpatch support (and zstd support,
+   for efforts below 5).
+ - They can only be applied to `bare`, `bare-user` and
+   `bare-user-only` repositories, because the old stream is read
+   directly from the stored objects.
+ - They never contain fallback objects, and the options tuning the
+   classic scheme (`--min-fallback-size`, `--max-bsdiff-size`,
+   `--max-chunk-size`, `--disable-bsdiff`) do not apply.
+ - Unlike bsdiff sources, files that are not world-readable are used
+   as diff sources.  A client that cannot read its own objects (an
+   unprivileged user whose repository has a root-owned parent
+   repository) therefore cannot apply them.
+
+### The stream part format
+
+A stream part starts with the byte `s` where other parts have their
+compression type, followed by:
+
+ - `y`: the compression of the header
+ - `t`: the stored length of the header (little endian)
+ - the header, a (compressed) GVariant of type
+   `(yyttaya(uuu)aa(ayay)a(uut))`
+ - the (compressed) data, to the end of the part
+
+The header contains:
+
+ - `y`: the compression of the data: `0` none, `x` xz, `z` zstd
+ - `y`: the kind of data: `0` the new stream itself, `1` an
+   uncompressed HDiffPatch single-stream diff (`HDIFFSF20`)
+ - `t`: the size of the new stream
+ - `t`: the uncompressed size of the data
+ - `ay`: the old stream, as a list of (object type, checksum) pairs
+ - `a(uuu)`, `aa(ayay)`: modes and extended attributes, as in other
+   parts
+ - `a(uut)`: for each object of the part, in the order of the part's
+   object list in the superblock: a mode index, an xattr index, and
+   its size in the new stream
+
+Metadata objects are represented in a stream by their serialized
+bytes, regular files by their content, and symbolic links by their
+target.
+
 ## Fallback objects
 
 It's possible for there to be large-ish files which might be resistant
