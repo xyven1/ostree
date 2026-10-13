@@ -283,10 +283,20 @@ all work unchanged.  Their limitations:
  - They never contain fallback objects, and the options tuning the
    classic scheme (`--min-fallback-size`, `--max-bsdiff-size`,
    `--max-chunk-size`, `--disable-bsdiff`) do not apply.
- - Unlike bsdiff sources, files that are not world-readable are used
-   as diff sources.  A client that cannot read its own objects (an
-   unprivileged user whose repository has a root-owned parent
-   repository) therefore cannot apply them.
+
+### Private delta sources
+
+No kind of delta, by default, is computed against a file of the origin
+commit that is not world-readable; the new version of such a file is
+included whole.  This guarantees that the client can read every object
+it needs to apply the delta, even an unprivileged user whose repository
+has a root-owned `bare` repository as its parent.
+
+`--allow-private-sources` lifts the restriction.  It is safe wherever
+updates are applied by root, or to a `bare-user` repository without such
+a parent, and can make a small delta several times smaller: the files
+that change in every build of an operating system (package caches,
+logs) are often exactly the ones that are not world-readable.
 
 ### The bulk part format
 

@@ -966,14 +966,11 @@ generator_load_old_file (BulkGenerator *self, const char *checksum, const char *
   if (!ostree_repo_load_file (self->repo, checksum, NULL, &finfo, NULL, cancellable, error))
     return FALSE;
   const guint32 mode = g_file_info_get_attribute_uint32 (finfo, "unix::mode");
-  /* Unlike bsdiff/rollsum sources, files that are not world readable are
-   * used too: they are typically exactly the files that change on every
-   * build (package caches, logs), and leaving them out costs far more here
-   * than there.  The price is that such a delta cannot be applied by a
-   * client that cannot read its own objects, i.e. an unprivileged user
-   * whose repository has a root-owned bare parent repository.
+  /* As for bsdiff/rollsum sources: by default only use files that every
+   * client can read back, whatever its privileges; see private_sources.
    */
-  *out_usable = S_ISREG (mode) && g_file_info_get_size (finfo) > 0;
+  *out_usable = S_ISREG (mode) && g_file_info_get_size (finfo) > 0
+                && (self->options->private_sources || (mode & S_IROTH));
   if (!*out_usable)
     return TRUE;
   out->objtype = OSTREE_OBJECT_TYPE_FILE;

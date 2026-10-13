@@ -37,6 +37,7 @@ static gboolean opt_inline;
 static gboolean opt_disable_bsdiff;
 static char *opt_file_delta;
 static gboolean opt_bulk;
+static gboolean opt_allow_private_sources;
 static char *opt_effort;
 static char *opt_threads;
 static char *opt_compression;
@@ -93,6 +94,10 @@ static GOptionEntry generate_options[] = {
   { "bulk", 0, 0, G_OPTION_ARG_NONE, &opt_bulk,
     "Generate a bulk delta: diff whole groups of objects with HDiffPatch instead of per-file "
     "deltas (much faster and smaller; needs an ostree with hdiffpatch support to apply)",
+    NULL },
+  { "allow-private-sources", 0, 0, G_OPTION_ARG_NONE, &opt_allow_private_sources,
+    "Also compute deltas against files that are not world-readable (smaller deltas; cannot be "
+    "applied by a client that is unable to read all of its own objects)",
     NULL },
   { "effort", 0, 0, G_OPTION_ARG_STRING, &opt_effort,
     "With --bulk: 0 (fastest generation) to 9 (smallest delta); 0-4 use zstd, 5-9 xz.  Default "
@@ -433,6 +438,9 @@ ot_static_delta_builtin_generate (int argc, char **argv, OstreeCommandInvocation
         g_variant_builder_add (parambuilder, "{sv}", "bulk", g_variant_new_boolean (TRUE));
       else if (opt_effort)
         return glnx_throw (error, "--effort requires --bulk");
+      if (opt_allow_private_sources)
+        g_variant_builder_add (parambuilder, "{sv}", "private-sources",
+                               g_variant_new_boolean (TRUE));
       if (opt_effort)
         g_variant_builder_add (parambuilder, "{sv}", "effort",
                                g_variant_new_uint32 (g_ascii_strtoull (opt_effort, NULL, 10)));

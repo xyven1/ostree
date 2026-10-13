@@ -216,6 +216,8 @@ typedef struct
   guint threads;
   gboolean verbose;
   gboolean swap_endian;
+  /* Also diff against files that are not world readable */
+  gboolean private_sources;
 } OstreeStaticDeltaBulkOptions;
 
 typedef struct

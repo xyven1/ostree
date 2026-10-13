@@ -116,6 +116,22 @@ License along with this library. If not, see <https://www.gnu.org/licenses/>.
             </varlistentry>
 
             <varlistentry>
+                <term><option>--allow-private-sources</option></term>
+
+                <listitem><para>
+                    Also compute deltas against files of the origin commit that are not
+                    world-readable.  By default such files are never used as the source of a
+                    delta, and their new versions are included whole; this guarantees that a
+                    delta can be applied even by a client that cannot read all of the objects
+                    in its repository, namely an unprivileged user whose repository has a
+                    root-owned <literal>bare</literal> parent repository.  Where updates are
+                    applied by root, or to a <literal>bare-user</literal> repository without
+                    such a parent, this option is safe and makes deltas smaller.  It applies
+                    to every kind of delta.
+                </para></listitem>
+            </varlistentry>
+
+            <varlistentry>
                 <term><option>--effort</option>=N</term>
 
                 <listitem><para>

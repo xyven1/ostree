@@ -123,12 +123,9 @@ The classic figure for the SDK OS was measured while other jobs were running and
 
 ## Decisions that are open to being overruled
 
-- **Non-world-readable diff sources.** The classic scheme refuses to use a file as a delta source
-  unless it is world-readable, so that an unprivileged client with a root-owned parent repository
-  can still apply the delta. Bulk deltas use such files. On the SDK OS pair, honouring the rule
-  made the delta 47 KB instead of 18 KB, because the files that change every build (package caches,
-  logs) are exactly the unreadable ones. This is safe for devices that apply updates as root; it is
-  a one-line change in `generator_load_old_file()` to go back.
+- **Non-world-readable diff sources.** Settled: opt-in for every kind of delta with
+  `--allow-private-sources`, off by default as in upstream ostree. The measurements in this note
+  that involve bulk deltas were taken with such sources in use.
 - **Default effort 5.** Chosen because it roughly matches the size of today's deltas at 30 to 100
   times the speed. Efforts 0 to 4 need zstd on the client.
 - **No fallback objects in bulk deltas.** `--min-fallback-size` is ignored rather than rejected.

@@ -26,7 +26,7 @@ skip_without_user_xattrs
 skip_without_ostree_feature hdiffpatch
 skip_without_ostree_feature zstd
 
-echo '1..14'
+echo '1..15'
 
 # Deterministic pseudo-random data: compressible, but not trivially so
 gen_data() {
@@ -153,9 +153,21 @@ for effort in 0 1 2 3 4 5 6 7 8 9; do
 done
 echo "ok bulk delta at every effort"
 
-# The whole point: far smaller than the classic scheme on an update
-bulk_size=$(stat -c '%s' deltas/bulk-5)
-if test $((bulk_size * 3)) -gt ${classic_size}; then
+# The whole point: far smaller than the classic scheme on an update.  Compare
+# like with like: by default neither diffs the non-world-readable file.
+for sources in "" "--allow-private-sources"; do
+    ${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} \
+                  --min-fallback-size=0 --inline --filename=deltas/size-classic ${sources}
+    ${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} \
+                  --inline --filename=deltas/size-bulk --bulk ${sources}
+    classic_size=$(stat -c '%s' deltas/size-classic)
+    bulk_size=$(stat -c '%s' deltas/size-bulk)
+    if test ${bulk_size} -ge ${classic_size}; then
+        assert_not_reached "bulk delta (${bulk_size}) not smaller than classic (${classic_size}) with '${sources}'"
+    fi
+done
+# With everything diffable it is at least a third smaller on this tree
+if test $((bulk_size * 3)) -gt $((classic_size * 2)); then
     assert_not_reached "bulk delta (${bulk_size}) not much smaller than classic (${classic_size})"
 fi
 echo "ok bulk delta size"
@@ -286,6 +298,28 @@ for variant in "--compression=xz" "--compression=zstd --file-delta=hdiff"; do
     apply_and_check deltas/mt-4/superblock empty
 done
 echo "ok parallel part compression"
+
+# Files that are not world readable (etc/secret here) are only used as delta
+# sources on request, for every kind of delta
+for variant in "--file-delta=hdiff" "--bulk"; do
+    ${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} \
+                  --min-fallback-size=0 --inline --filename=deltas/private-off ${variant}
+    ${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} \
+                  --min-fallback-size=0 --inline --filename=deltas/private-on ${variant} \
+                  --allow-private-sources
+    apply_and_check deltas/private-off
+    apply_and_check deltas/private-on
+    off_size=$(stat -c '%s' deltas/private-off)
+    on_size=$(stat -c '%s' deltas/private-on)
+    # The 40k secret file differs by one byte; shipping it whole costs kilobytes
+    if test $((on_size + 4096)) -gt ${off_size}; then
+        assert_not_reached "${variant}: private sources did not shrink the delta (${on_size} vs ${off_size})"
+    fi
+done
+${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} \
+              --min-fallback-size=0 --inline --filename=deltas/private-bsdiff --allow-private-sources
+apply_and_check deltas/private-bsdiff
+echo "ok private delta sources"
 
 # Option validation
 if ${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} \

@@ -91,6 +91,8 @@ typedef struct
   int compression_level;
   /* Use HDiffPatch rather than bsdiff for per-file deltas */
   gboolean use_hdiff;
+  /* Also use files that are not world readable as delta sources */
+  gboolean private_sources;
   /* Block size of the hdiff pre-match; 0 for the default */
   guint hdiff_block_size;
   /* Parts are compressed on this many threads */
@@ -1200,13 +1202,17 @@ generate_delta_lowlatency (OstreeRepo *repo, const char *from, const char *to, D
        * be readable by the client when applying the delta, regardless its
        * access privileges, so that we don't run into permissions problems
        * when the client is trying to update a bare-user repository with a
-       * bare repository defined as its parent.
+       * bare repository defined as its parent.  The private-sources option
+       * lifts this for deployments where that cannot happen.
        */
-      if (!check_object_world_readable (repo, from_checksum, &from_world_readable, cancellable,
-                                        error))
-        return FALSE;
-      if (!from_world_readable)
-        continue;
+      if (!builder->private_sources)
+        {
+          if (!check_object_world_readable (repo, from_checksum, &from_world_readable, cancellable,
+                                            error))
+            return FALSE;
+          if (!from_world_readable)
+            continue;
+        }
 
       if (!try_content_rollsum (repo, opts, from_checksum, to_checksum, &rollsum, cancellable,
                                 error))
@@ -1452,6 +1458,11 @@ get_fallback_headers (OstreeRepo *self, OstreeStaticDeltaBuilder *builder, GVari
  *   - threads: u: The number of threads to use.  Bulk deltas default to one per processor (0).
  * Otherwise the default is 1, and more threads compress several delta parts at once; the
  * resulting delta is the same.
+ *   - private-sources: b: Also compute deltas against files of the origin commit that are not
+ * world readable.  By default these are never used as delta sources, so that a delta can be
+ * applied by a client which cannot read all of its own objects (an unprivileged user whose
+ * repository has a root-owned bare parent); the new versions of such files are then shipped
+ * whole.  Applies to every kind of delta.  Default FALSE.
  *   - file-delta: s: Per-file delta algorithm: "bsdiff" (default) or "hdiff".  hdiff is
  * around 100x faster to generate, is not subject to max-bsdiff-size, and cannot be applied
  * by versions of ostree without hdiffpatch support.
@@ -1539,6 +1550,9 @@ ostree_repo_static_delta_generate (OstreeRepo *self, OstreeStaticDeltaGenerateOp
                        bulk_options.effort, OSTREE_STATIC_DELTA_BULK_EFFORT_MAX);
   if (!g_variant_lookup (params, "threads", "u", &bulk_options.threads))
     bulk_options.threads = 0;
+  if (!g_variant_lookup (params, "private-sources", "b", &bulk_options.private_sources))
+    bulk_options.private_sources = FALSE;
+  builder.private_sources = bulk_options.private_sources;
 
   {
     const char *file_delta = NULL;
