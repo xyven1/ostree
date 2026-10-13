@@ -340,14 +340,8 @@ finish_part (OstreeStaticDeltaBuilder *builder, GError **error)
 }
 
 static OstreeStaticDeltaPartBuilder *
-allocate_part (OstreeStaticDeltaBuilder *builder, GError **error)
+allocate_part_builder (void)
 {
-  if (builder->parts->len > 0)
-    {
-      if (!finish_part (builder, error))
-        return NULL;
-    }
-
   OstreeStaticDeltaPartBuilder *part = g_new0 (OstreeStaticDeltaPartBuilder, 1);
   part->objects = g_ptr_array_new_with_free_func ((GDestroyNotify)g_variant_unref);
   part->payload = g_string_new (NULL);
@@ -359,6 +353,19 @@ allocate_part (OstreeStaticDeltaBuilder *builder, GError **error)
   part->xattr_set = g_hash_table_new_full (xattr_chunk_hash, xattr_chunk_equals,
                                            (GDestroyNotify)g_variant_unref, NULL);
   part->xattrs = g_ptr_array_new ();
+  return part;
+}
+
+static OstreeStaticDeltaPartBuilder *
+allocate_part (OstreeStaticDeltaBuilder *builder, GError **error)
+{
+  if (builder->parts->len > 0)
+    {
+      if (!finish_part (builder, error))
+        return NULL;
+    }
+
+  OstreeStaticDeltaPartBuilder *part = allocate_part_builder ();
   g_ptr_array_add (builder->parts, part);
   return part;
 }
@@ -1312,6 +1319,16 @@ get_fallback_headers (OstreeRepo *self, OstreeStaticDeltaBuilder *builder, GVari
  *   - compression: y: Compression type for delta parts: x=lzma (default), z=zstd.  Deltas
  * using zstd cannot be applied by versions of ostree without zstd support.
  *   - compression-level: i: Compression level; currently only used for zstd.  Default 10.
+ *   - stream: b: Generate a "stream" delta: instead of per-file deltas, whole groups of
+ * objects (including directory metadata) are diffed against each other with HDiffPatch.  Far
+ * faster and smaller than the default scheme.  Stream deltas never contain fallback objects
+ * and ignore min-fallback-size, max-bsdiff-size, max-chunk-size, bsdiff-enabled, file-delta
+ * and compression.  They need hdiffpatch support (and for efforts below 5, zstd) to generate
+ * and apply, and can only be applied to bare repositories.  Default FALSE.
+ *   - effort: u: For stream deltas, from 0 (fastest generation; for tight development loops)
+ * to 9 (smallest result; for expensive links).  Efforts 0-4 use zstd, 5-9 xz.  Default 5.
+ *   - threads: u: For stream deltas, the number of threads to use; 0 (the default) uses one
+ * per processor.
  *   - file-delta: s: Per-file delta algorithm: "bsdiff" (default) or "hdiff".  hdiff is
  * around 100x faster to generate, is not subject to max-bsdiff-size, and cannot be applied
  * by versions of ostree without hdiffpatch support.
@@ -1385,6 +1402,20 @@ ostree_repo_static_delta_generate (OstreeRepo *self, OstreeStaticDeltaGenerateOp
     if (!use_bsdiff)
       delta_opts |= DELTAOPT_FLAG_DISABLE_BSDIFF;
   }
+
+  gboolean use_stream;
+  OstreeStaticDeltaStreamOptions stream_options = {
+    0,
+  };
+  if (!g_variant_lookup (params, "stream", "b", &use_stream))
+    use_stream = FALSE;
+  if (!g_variant_lookup (params, "effort", "u", &stream_options.effort))
+    stream_options.effort = OSTREE_STATIC_DELTA_STREAM_EFFORT_DEFAULT;
+  if (stream_options.effort > OSTREE_STATIC_DELTA_STREAM_EFFORT_MAX)
+    return glnx_throw (error, "Invalid 'effort' parameter %u (maximum is %u)",
+                       stream_options.effort, OSTREE_STATIC_DELTA_STREAM_EFFORT_MAX);
+  if (!g_variant_lookup (params, "threads", "u", &stream_options.threads))
+    stream_options.threads = 0;
 
   {
     const char *file_delta = NULL;
@@ -1482,8 +1513,31 @@ ostree_repo_static_delta_generate (OstreeRepo *self, OstreeStaticDeltaGenerateOp
     }
   builder.parts_dfd = descriptor_dfd;
 
+  if (use_stream)
+    {
+      g_autoptr (GPtrArray) stream_parts
+          = g_ptr_array_new_with_free_func ((GDestroyNotify)_ostree_static_delta_stream_part_free);
+      stream_options.verbose = (delta_opts & DELTAOPT_FLAG_VERBOSE) > 0;
+      stream_options.swap_endian = builder.swap_endian;
+      if (!_ostree_static_delta_stream_generate (self, from, to, &stream_options, descriptor_dfd,
+                                                 stream_parts, cancellable, error))
+        return FALSE;
+
+      /* Hand the finished parts to the common superblock code below */
+      for (guint j = 0; j < stream_parts->len; j++)
+        {
+          OstreeStaticDeltaStreamPart *stream_part = stream_parts->pdata[j];
+          OstreeStaticDeltaPartBuilder *part = allocate_part_builder ();
+          part->part_tmpf = stream_part->tmpf;
+          stream_part->tmpf.initialized = FALSE;
+          part->header = g_steal_pointer (&stream_part->header);
+          part->compressed_size = stream_part->compressed_size;
+          part->uncompressed_size = stream_part->uncompressed_size;
+          g_ptr_array_add (builder.parts, part);
+        }
+    }
   /* Ignore optimization flags */
-  if (!generate_delta_lowlatency (self, from, to, delta_opts, &builder, cancellable, error))
+  else if (!generate_delta_lowlatency (self, from, to, delta_opts, &builder, cancellable, error))
     return FALSE;
 
   if (!glnx_open_tmpfile_linkable_at (descriptor_dfd, ".", O_RDWR | O_CLOEXEC, &descriptor_tmpf,

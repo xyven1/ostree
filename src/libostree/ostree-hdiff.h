@@ -61,6 +61,13 @@ typedef struct
     1024, 6, FALSE, 1 \
   }
 
+/* Precise differ: loads what it needs of both inputs into memory (in the
+ * worst case all of both, plus working space of several times the old size).
+ */
+gboolean _ostree_hdiff_create_block (const OtHdiffInput *old_in, const OtHdiffInput *new_in,
+                                     const OtHdiffMemOptions *options, GBytes **out_diff,
+                                     GError **error);
+
 gboolean _ostree_hdiff_create_mem (const guint8 *old_data, gsize old_len, const guint8 *new_data,
                                    gsize new_len, const OtHdiffMemOptions *options,
                                    GBytes **out_diff, GError **error);

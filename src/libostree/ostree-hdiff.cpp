@@ -183,27 +183,24 @@ throw_patch_failed (PatchListener *listener, GError **error)
 } /* namespace */
 
 gboolean
-_ostree_hdiff_create_mem (const guint8 *old_data, gsize old_len, const guint8 *new_data,
-                          gsize new_len, const OtHdiffMemOptions *options, GBytes **out_diff,
-                          GError **error)
+_ostree_hdiff_create_block (const OtHdiffInput *old_in, const OtHdiffInput *new_in,
+                            const OtHdiffMemOptions *options, GBytes **out_diff, GError **error)
 {
   const OtHdiffMemOptions defaults = OT_HDIFF_MEM_OPTIONS_DEFAULT;
   if (options == NULL)
     options = &defaults;
 
+  hpatch_TStreamInput old_stream, new_stream;
+  input_init (&old_stream, old_in);
+  input_init (&new_stream, new_in);
+
   try
     {
       std::vector<unsigned char> diff;
       const size_t threads = MAX (options->threads, 1);
-      /* Go through the stream entry point, which copies what it needs: the
-       * in-memory one temporarily rewrites its input buffers in place, and
-       * ours are frequently read-only mappings of repository objects.
-       */
-      hpatch_TStreamInput old_stream, new_stream;
-      mem_as_hStreamInput (&old_stream, old_data, old_data + old_len);
-      mem_as_hStreamInput (&new_stream, new_data, new_data + new_len);
       hdiff_private::TVectorAsStreamOutput out_stream (diff);
-      const hdiff_TMTSets_s mtsets = { threads, threads, true, true };
+      /* Our inputs are not safe for concurrent use; HDiffPatch then locks */
+      const hdiff_TMTSets_s mtsets = { threads, threads, false, false };
       create_single_compressed_diff_block (&new_stream, &old_stream, &out_stream, NULL,
                                            OT_HDIFF_STEP_MEM,
                                            MAX (options->fast_match_block, kMatchBlockSize_min),
@@ -217,6 +214,37 @@ _ostree_hdiff_create_mem (const guint8 *old_data, gsize old_len, const guint8 *n
       return FALSE;
     }
   return TRUE;
+}
+
+namespace
+{
+struct MemInput
+{
+  const guint8 *data;
+};
+
+gboolean
+mem_input_read (gpointer user_data, guint64 pos, guint8 *buf, gsize len)
+{
+  memcpy (buf, static_cast<MemInput *> (user_data)->data + pos, len);
+  return TRUE;
+}
+} /* namespace */
+
+/* Note HDiffPatch's own in-memory entry point temporarily rewrites its input
+ * buffers in place; ours are frequently read-only mappings of repository
+ * objects, so go through the input-based one, which copies what it needs.
+ */
+gboolean
+_ostree_hdiff_create_mem (const guint8 *old_data, gsize old_len, const guint8 *new_data,
+                          gsize new_len, const OtHdiffMemOptions *options, GBytes **out_diff,
+                          GError **error)
+{
+  MemInput old_mem = { old_data };
+  MemInput new_mem = { new_data };
+  const OtHdiffInput old_in = { old_len, mem_input_read, &old_mem };
+  const OtHdiffInput new_in = { new_len, mem_input_read, &new_mem };
+  return _ostree_hdiff_create_block (&old_in, &new_in, options, out_diff, error);
 }
 
 gboolean
