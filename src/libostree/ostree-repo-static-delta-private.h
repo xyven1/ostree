@@ -139,6 +139,13 @@ typedef enum
 } OstreeStaticDeltaOpCode;
 #define OSTREE_STATIC_DELTA_N_OPS 7
 
+/* Values of the leading compression byte of a delta part.  Classic parts
+ * are uncompressed or xz; zstd is only used inside bulk parts.
+ */
+#define OSTREE_STATIC_DELTA_COMPRESSION_NONE 0
+#define OSTREE_STATIC_DELTA_COMPRESSION_XZ 'x'
+#define OSTREE_STATIC_DELTA_COMPRESSION_ZSTD 'z'
+
 gboolean _ostree_static_delta_part_open (GInputStream *part_in, GBytes *inline_part_bytes,
                                          OstreeStaticDeltaOpenFlags flags,
                                          const char *expected_checksum, GVariant **out_part,
