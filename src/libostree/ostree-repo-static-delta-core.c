@@ -787,6 +787,32 @@ _ostree_static_delta_part_open (GInputStream *part_in, GBytes *inline_part_bytes
             G_VARIANT_TYPE (OSTREE_STATIC_DELTA_PART_PAYLOAD_FORMAT_V0), buf, FALSE);
       }
       break;
+    case OSTREE_STATIC_DELTA_PART_BULK:
+      {
+        /* A bulk part (see OSTREE_STATIC_DELTA_PART_BULK) is not
+         * decompressed up front; we return its raw content as an "ay"
+         * variant which _ostree_static_delta_part_execute() streams from.
+         */
+        g_autoptr (GBytes) content_bytes = NULL;
+        if (inline_part_bytes)
+          content_bytes = g_bytes_new_from_bytes (inline_part_bytes, 1,
+                                                  g_bytes_get_size (inline_part_bytes) - 1);
+        else
+          {
+            int part_fd = g_file_descriptor_based_get_fd ((GFileDescriptorBased *)part_in);
+            g_autoptr (GBytes) whole = ot_fd_readall_or_mmap (part_fd, 0, error);
+            if (!whole)
+              return FALSE;
+            if (g_bytes_get_size (whole) < 1)
+              return glnx_throw (error, "Truncated static delta part");
+            content_bytes = g_bytes_new_from_bytes (whole, 1, g_bytes_get_size (whole) - 1);
+          }
+        if (!skip_checksum)
+          g_checksum_update (checksum, g_bytes_get_data (content_bytes, NULL),
+                             g_bytes_get_size (content_bytes));
+        ret_part = g_variant_new_from_bytes (G_VARIANT_TYPE ("ay"), content_bytes, TRUE);
+      }
+      break;
     default:
       return glnx_throw (error, "Invalid compression type '%u'", comptype);
     }
@@ -837,6 +863,16 @@ show_one_part (OstreeRepo *self, gboolean swap_endian, const char *from, const c
                                        NULL, &part, cancellable, error))
     return FALSE;
 
+  if (g_variant_is_of_type (part, G_VARIANT_TYPE ("ay")))
+    {
+      g_autofree char *description = NULL;
+      if (!_ostree_static_delta_bulk_part_describe (part, &description, error))
+        return FALSE;
+      g_print ("PartPayload%u: %s\n", i, description);
+      if (!_ostree_static_delta_part_execute (self, objects, part, TRUE, NULL, cancellable, error))
+        return FALSE;
+    }
+  else
   {
     g_autoptr (GVariant) modes = NULL;
     g_autoptr (GVariant) xattrs = NULL;

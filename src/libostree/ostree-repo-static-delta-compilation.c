@@ -318,14 +318,8 @@ finish_part (OstreeStaticDeltaBuilder *builder, GError **error)
 }
 
 static OstreeStaticDeltaPartBuilder *
-allocate_part (OstreeStaticDeltaBuilder *builder, GError **error)
+allocate_part_builder (void)
 {
-  if (builder->parts->len > 0)
-    {
-      if (!finish_part (builder, error))
-        return NULL;
-    }
-
   OstreeStaticDeltaPartBuilder *part = g_new0 (OstreeStaticDeltaPartBuilder, 1);
   part->objects = g_ptr_array_new_with_free_func ((GDestroyNotify)g_variant_unref);
   part->payload = g_string_new (NULL);
@@ -337,6 +331,19 @@ allocate_part (OstreeStaticDeltaBuilder *builder, GError **error)
   part->xattr_set = g_hash_table_new_full (xattr_chunk_hash, xattr_chunk_equals,
                                            (GDestroyNotify)g_variant_unref, NULL);
   part->xattrs = g_ptr_array_new ();
+  return part;
+}
+
+static OstreeStaticDeltaPartBuilder *
+allocate_part (OstreeStaticDeltaBuilder *builder, GError **error)
+{
+  if (builder->parts->len > 0)
+    {
+      if (!finish_part (builder, error))
+        return NULL;
+    }
+
+  OstreeStaticDeltaPartBuilder *part = allocate_part_builder ();
   g_ptr_array_add (builder->parts, part);
   return part;
 }
@@ -1267,6 +1274,22 @@ get_fallback_headers (OstreeRepo *self, OstreeStaticDeltaBuilder *builder, GVari
  *   for input files
  *   - compression: y: Compression type: 0=none, x=lzma, g=gzip
  *   - bsdiff-enabled: b: Enable bsdiff compression.  Default TRUE.
+ *   - bulk: b: Generate a "bulk" delta: instead of per-file deltas, whole groups of
+ * objects (including directory metadata) are diffed against each other with HDiffPatch.  Far
+ * faster and smaller than the default scheme.  Bulk deltas never contain fallback objects
+ * and ignore min-fallback-size, max-bsdiff-size, max-chunk-size and bsdiff-enabled.  They
+ * need hdiffpatch and zstd support to generate and apply, and can only be applied to bare
+ * repositories.  Default FALSE.
+ *   - effort: u: For bulk deltas, from 0 (fastest generation; for tight development loops)
+ * to 9 (smallest result; for expensive links).  The levels are described in
+ * ostree-static-delta(1).  Default 4.
+ *   - threads: u: For bulk deltas, the number of threads to use.  Default 0: one per
+ * processor.
+ *   - private-sources: b: For bulk deltas, also diff against files of the origin commit that
+ * are not world readable.  By default these are never used as delta sources, so that a delta
+ * can be applied by a client which cannot read all of its own objects (an unprivileged user
+ * whose repository has a root-owned bare parent); the new versions of such files are then
+ * shipped whole.  Default FALSE.
  *   - inline-parts: b: Put part data in header, to get a single file delta.  Default FALSE.
  *   - verbose: b: Print diagnostic messages.  Default FALSE.
  *   - endianness: b: Deltas use host byte order by default; this option allows choosing
@@ -1337,6 +1360,22 @@ ostree_repo_static_delta_generate (OstreeRepo *self, OstreeStaticDeltaGenerateOp
       delta_opts |= DELTAOPT_FLAG_DISABLE_BSDIFF;
   }
 
+  gboolean use_bulk;
+  OstreeStaticDeltaBulkOptions bulk_options = {
+    0,
+  };
+  if (!g_variant_lookup (params, "bulk", "b", &use_bulk))
+    use_bulk = FALSE;
+  if (!g_variant_lookup (params, "effort", "u", &bulk_options.effort))
+    bulk_options.effort = OSTREE_STATIC_DELTA_BULK_EFFORT_DEFAULT;
+  if (bulk_options.effort > OSTREE_STATIC_DELTA_BULK_EFFORT_MAX)
+    return glnx_throw (error, "Invalid 'effort' parameter %u (maximum is %u)",
+                       bulk_options.effort, OSTREE_STATIC_DELTA_BULK_EFFORT_MAX);
+  if (!g_variant_lookup (params, "threads", "u", &bulk_options.threads))
+    bulk_options.threads = 0;
+  if (!g_variant_lookup (params, "private-sources", "b", &bulk_options.private_sources))
+    bulk_options.private_sources = FALSE;
+
   {
     gboolean verbose;
     if (!g_variant_lookup (params, "verbose", "b", &verbose))
@@ -1392,8 +1431,31 @@ ostree_repo_static_delta_generate (OstreeRepo *self, OstreeStaticDeltaGenerateOp
     }
   builder.parts_dfd = descriptor_dfd;
 
+  if (use_bulk)
+    {
+      g_autoptr (GPtrArray) bulk_parts
+          = g_ptr_array_new_with_free_func ((GDestroyNotify)_ostree_static_delta_bulk_part_free);
+      bulk_options.verbose = (delta_opts & DELTAOPT_FLAG_VERBOSE) > 0;
+      bulk_options.swap_endian = builder.swap_endian;
+      if (!_ostree_static_delta_bulk_generate (self, from, to, &bulk_options, descriptor_dfd,
+                                                 bulk_parts, cancellable, error))
+        return FALSE;
+
+      /* Hand the finished parts to the common superblock code below */
+      for (guint j = 0; j < bulk_parts->len; j++)
+        {
+          OstreeStaticDeltaBulkPart *bulk_part = bulk_parts->pdata[j];
+          OstreeStaticDeltaPartBuilder *part = allocate_part_builder ();
+          part->part_tmpf = bulk_part->tmpf;
+          bulk_part->tmpf.initialized = FALSE;
+          part->header = g_steal_pointer (&bulk_part->header);
+          part->compressed_size = bulk_part->compressed_size;
+          part->uncompressed_size = bulk_part->uncompressed_size;
+          g_ptr_array_add (builder.parts, part);
+        }
+    }
   /* Ignore optimization flags */
-  if (!generate_delta_lowlatency (self, from, to, delta_opts, &builder, cancellable, error))
+  else if (!generate_delta_lowlatency (self, from, to, delta_opts, &builder, cancellable, error))
     return FALSE;
 
   if (!glnx_open_tmpfile_linkable_at (descriptor_dfd, ".", O_RDWR | O_CLOEXEC, &descriptor_tmpf,
