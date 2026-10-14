@@ -146,10 +146,10 @@ ZLIB_DEPENDENCY=zlib
 PKG_CHECK_MODULES(OT_DEP_ZLIB, $ZLIB_DEPENDENCY)
 REQUIRES_PRIVATE="${REQUIRES_PRIVATE} ${ZLIB_DEPENDENCY}"
 
-dnl Optional: zstd compression for archive-zstd repositories
+dnl Optional: zstd compression for bulk static deltas
 ZSTD_DEPENDENCY="libzstd >= 1.4.0"
 AC_ARG_WITH([zstd],
-  [AS_HELP_STRING([--with-zstd], [Enable archive-zstd repository support @<:@default=auto@:>@])],
+  [AS_HELP_STRING([--with-zstd], [Enable zstd compression of bulk static deltas @<:@default=auto@:>@])],
   [], [with_zstd=auto])
 AS_IF([test x$with_zstd != xno], [
   PKG_CHECK_MODULES([OT_DEP_ZSTD], [$ZSTD_DEPENDENCY], [have_zstd=yes], [have_zstd=no])
@@ -164,9 +164,9 @@ AS_IF([test x$with_zstd = xyes], [
 ])
 AM_CONDITIONAL([USE_ZSTD], [test x$with_zstd = xyes])
 
-dnl Optional: HDiffPatch (bundled as a git submodule) for hdiff-based static deltas
+dnl Optional: HDiffPatch (bundled as a git submodule) for bulk static deltas
 AC_ARG_WITH([hdiffpatch],
-  [AS_HELP_STRING([--with-hdiffpatch], [Enable hdiff-based static deltas using the bundled HDiffPatch @<:@default=auto@:>@])],
+  [AS_HELP_STRING([--with-hdiffpatch], [Enable bulk static deltas using the bundled HDiffPatch @<:@default=auto@:>@])],
   [], [with_hdiffpatch=auto])
 AS_IF([test x$with_hdiffpatch != xno], [
   AS_IF([test -f "$srcdir/hdiffpatch/libHDiffPatch/HDiff/diff.h" && test "x$CXX" != x && test "x$CXX" != xno],
@@ -791,8 +791,8 @@ echo "
     libsodium (ed25519 signatures):               $with_ed25519_libsodium
     openssl (ed25519 and spki signatures):        $with_openssl
     libarchive (parse tar files directly):        $with_libarchive
-    zstd (archive-zstd repositories, deltas):     $with_zstd
-    hdiffpatch (hdiff static deltas):             $with_hdiffpatch
+    zstd (bulk static delta compression):         $with_zstd
+    hdiffpatch (bulk static deltas):              $with_hdiffpatch
     static deltas:                                yes (always enabled now)
     O_TMPFILE:                                    $enable_otmpfile
     wrpseudo-compat:                              $enable_wrpseudo_compat
