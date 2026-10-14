@@ -452,3 +452,61 @@ from sections 1-12, this section wins.
   test.
 - The dev shell is the first commit, not the last as listed in section
   12, because nothing builds without it.
+
+## 14. Performance tuning (2026-10-13)
+
+Benchmark-driven changes made after the first real-world report. These
+replace the numbers in section 7.
+
+### What was measured
+
+From a workstation to the GovCloud bucket: about 40 ms round trip, 50-60 ms
+per small GET on a warm connection, about 1.5 MiB/s per connection, and a
+total that scales with connections up to roughly 22 MiB/s. That link's
+capacity swung between 5 and 20 MiB/s from minute to minute, so tuning was
+done against a local throttling server reproducing those four numbers and
+serving a mirror of real refs, then confirmed against S3.
+
+### Changes
+
+| Change | Why |
+|---|---|
+| Default concurrent requests for `s3://`: 32 -> 128 | Each object costs a round trip; an 88k-object pull is latency-bound. 156 s at 32, 88 s at 64, 61 s at 128, flat at 256. |
+| Delta parts downloading at once for `s3://`: 2 -> 16 | With two connections at 1.5 MiB/s a 642 MiB delta used a seventh of the link. 136 s at 2, 51 s at 8, 45 s at 16. Applying parts is still gated by `_OSTREE_MAX_OUTSTANDING_WRITE_REQUESTS`, so memory use while applying is unchanged; up to 16 downloaded parts can wait on disk. |
+| Objects over 4 MiB are fetched as parallel 4 MiB ranges | Without it the end of a pull waits on its largest object arriving alone on one slow connection. 32 s -> 22 s for a 434 MiB pull whose largest object is 26 MiB; the link floor is 20 s. |
+
+Ranged fetching, in detail:
+
+- Every eligible request (a download to a file, with no conditional
+  headers) asks for `Range: bytes=0-4194303`. A 206 response carries the
+  total size in `Content-Range`; if there is more, the remainder is fetched
+  as further ranged requests that `pwrite` into the same tmpfile.
+- Follow-up ranges send `If-Match` with the first response's ETag, so parts
+  of two different objects are never combined.
+- A 416 (a zero-length object) is retried once without a range.
+- Follow-up ranges are extra transfers beyond the pull's request limit,
+  bounded only by the fetcher's connection cap. With
+  `--max-outstanding-fetcher-requests=1`, a large object still uses several
+  connections.
+- In-memory requests (summary, config, refs) and conditional requests are
+  never split.
+
+### Tried and rejected
+
+- **Raising the write limit (3).** No effect on small-object pulls and
+  about 10% on delta pulls. Left at upstream's value, which exists to
+  protect other I/O on the device.
+- **More than 128 concurrent requests.** No further gain.
+- **Dropping the signing layer's overhead.** `s3://` is about 8% slower
+  than plain HTTP at 8,000 requests per second on a loopback link, which
+  is nothing at real latencies.
+
+### Still on the table
+
+- Delta pulls finish about 15 s above the link floor because applying parts
+  is CPU-bound and partly serial behind the write limit.
+- On a fast link the pull is bound by ostree's main thread, not the
+  network.
+- SSO token refresh (5.3) is no longer hypothetical: the cached token
+  expired during this work and pulls failed until credentials were supplied
+  another way.
