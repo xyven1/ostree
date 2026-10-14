@@ -51,7 +51,7 @@ rejected. Credentials always come from the AWS credential chain.
 For example:
 
 ```
-ostree remote add --set=gpg-verify=false os s3://my-bucket/repo?region=us-gov-west-1
+ostree remote add --set=gpg-verify=false os 's3://my-bucket/repo?region=us-gov-west-1'
 ostree pull os main
 ```
 
@@ -111,6 +111,18 @@ checksumming them, mirroring into an archive repo with `--http-trusted`:
 Checksums only prove that objects match the commit that was fetched. To know
 the commit itself is genuine, sign commits (`ostree sign`) and enable
 `sign-verify` on the remote.
+
+## Security notes
+
+- Requests carry an `Authorization` header and, with temporary credentials,
+  an `X-Amz-Security-Token` header. With `?endpoint=http://…` both travel
+  unencrypted; use `https://` for anything but a local test server.
+- `OSTREE_DEBUG_HTTP=1` prints request headers, including both of those.
+- Anyone who can configure a remote can point signed requests at a host of
+  their choosing with `?endpoint=`. Signatures are bound to that host, so
+  they cannot be replayed against AWS, but the access key ID and any session
+  token are disclosed to it. Treat permission to add or edit remotes
+  accordingly.
 
 ## Limitations
 

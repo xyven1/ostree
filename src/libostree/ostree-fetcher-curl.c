@@ -176,6 +176,8 @@ struct FetcherRequest
   gboolean s3_range_pending;   /* parent: children are about to be started */
   gboolean s3_range_self_done; /* parent: own transfer finished, waiting for children */
   guint s3_range_children;     /* parent: children still running */
+  GPtrArray *s3_range_tasks;   /* parent: children's tasks, until each completes (not owned) */
+  GSource *s3_range_spawn;     /* parent: idle that will start the children (owned) */
   GError *s3_range_error;      /* parent: first child failure */
   GTask *s3_range_parent;      /* child: the parent's task (owned) */
   guint64 s3_range_offset;     /* child: first byte to fetch */
@@ -434,8 +436,12 @@ fail_later_idle_cb (gpointer user_data)
   FailLaterData *data = user_data;
   OstreeFetcher *self = g_task_get_source_object (data->task);
 
-  g_task_return_error (data->task, g_steal_pointer (&data->error));
-  request_finished (self, data->task);
+  /* A range may have been cancelled, and so completed, in the meantime. */
+  if (!g_task_get_completed (data->task))
+    {
+      g_task_return_error (data->task, g_steal_pointer (&data->error));
+      request_finished (self, data->task);
+    }
   return G_SOURCE_REMOVE;
 }
 
@@ -798,6 +804,47 @@ s3_range_parent_transfer_done (OstreeFetcher *self, GTask *ptask)
     s3_range_finish_parent (self, ptask);
 }
 
+/* Forget @task if it is waiting for credentials. */
+static void
+s3_unpark (OstreeFetcher *self, GTask *task)
+{
+  GHashTableIter iter;
+  gpointer value;
+  g_hash_table_iter_init (&iter, self->s3_creds);
+  while (g_hash_table_iter_next (&iter, NULL, &value))
+    g_queue_remove (&((S3CredState *)value)->waiting, task);
+}
+
+/* Fail every range of @preq that is still downloading, waiting for
+ * credentials or about to start. Called as soon as the object has failed,
+ * so that no range outlives it: the pull only counts the parent, and may
+ * finish (and free the fetcher) once the parent is done. */
+static void
+s3_range_cancel_children (OstreeFetcher *self, FetcherRequest *preq)
+{
+  if (preq->s3_range_spawn != NULL)
+    {
+      g_source_destroy (preq->s3_range_spawn);
+      g_clear_pointer (&preq->s3_range_spawn, g_source_unref);
+      preq->s3_range_pending = FALSE;
+    }
+
+  g_autoptr (GPtrArray) tasks = g_steal_pointer (&preq->s3_range_tasks);
+  for (guint i = 0; tasks != NULL && i < tasks->len; i++)
+    {
+      GTask *ctask = tasks->pdata[i];
+      FetcherRequest *creq = g_task_get_task_data (ctask);
+      if (g_task_get_completed (ctask))
+        continue;
+      if (creq->easy != NULL)
+        (void)curl_multi_remove_handle (self->multi, creq->easy);
+      s3_unpark (self, ctask);
+      g_task_return_new_error (ctask, G_IO_ERROR, G_IO_ERROR_CANCELLED,
+                               "Another part of this object failed");
+      request_finished (self, ctask);
+    }
+}
+
 static void
 s3_range_child_done (GObject *source, GAsyncResult *result, gpointer user_data)
 {
@@ -811,8 +858,13 @@ s3_range_child_done (GObject *source, GAsyncResult *result, gpointer user_data)
   if (!g_task_propagate_boolean (ctask, &error) && preq->s3_range_error == NULL)
     preq->s3_range_error = g_steal_pointer (&error);
 
+  if (preq->s3_range_tasks != NULL)
+    g_ptr_array_remove (preq->s3_range_tasks, ctask);
   g_assert_cmpuint (preq->s3_range_children, >, 0);
   preq->s3_range_children--;
+  /* Once one range has failed the object has, so stop the others. */
+  if (preq->s3_range_error != NULL)
+    s3_range_cancel_children (self, preq);
   /* The parent may already have failed on its own and been returned. */
   if (preq->s3_range_children == 0 && preq->s3_range_self_done && !g_task_get_completed (ptask))
     s3_range_finish_parent (self, ptask);
@@ -827,6 +879,7 @@ s3_range_spawn_idle (gpointer user_data)
   OstreeFetcher *self = g_task_get_source_object (ptask);
   FetcherRequest *preq = g_task_get_task_data (ptask);
 
+  g_clear_pointer (&preq->s3_range_spawn, g_source_unref);
   preq->s3_range_pending = FALSE;
   if (g_task_get_completed (ptask))
     return G_SOURCE_REMOVE;
@@ -854,6 +907,9 @@ s3_range_spawn_idle (gpointer user_data)
                                        g_task_get_cancellable (ptask), s3_range_child_done, NULL);
 
       preq->s3_range_children++;
+      if (preq->s3_range_tasks == NULL)
+        preq->s3_range_tasks = g_ptr_array_new ();
+      g_ptr_array_add (preq->s3_range_tasks, ctask);
       g_hash_table_add (self->outstanding_requests, ctask); /* takes ownership */
       initiate_next_curl_request (creq, ctask);
     }
@@ -945,7 +1001,7 @@ s3_write (FetcherRequest *req, GTask *task, const void *ptr, size_t realsize, si
       GSource *source = g_idle_source_new ();
       g_source_set_callback (source, s3_range_spawn_idle, g_object_ref (task), g_object_unref);
       g_source_attach (source, req->fetcher->mainctx);
-      g_source_unref (source);
+      req->s3_range_spawn = source;
     }
 
   return FALSE;
@@ -1057,6 +1113,8 @@ s3_request_clear (FetcherRequest *req)
   g_clear_pointer (&req->s3_creds, _ostree_aws_credentials_unref);
   g_clear_error (&req->s3_range_error);
   g_clear_object (&req->s3_range_parent);
+  g_clear_pointer (&req->s3_range_tasks, g_ptr_array_unref);
+  g_clear_pointer (&req->s3_range_spawn, g_source_unref);
 }
 
 #else /* !HAVE_AWS */
@@ -1101,6 +1159,11 @@ s3_range_parent_transfer_done (OstreeFetcher *self, GTask *ptask)
 
 static void
 s3_request_clear (FetcherRequest *req)
+{
+}
+
+static void
+s3_range_cancel_children (OstreeFetcher *self, FetcherRequest *preq)
 {
 }
 
@@ -1239,6 +1302,12 @@ check_multi_info (OstreeFetcher *fetcher)
                   glnx_set_error_from_errno (error);
                   g_task_return_error (task, g_steal_pointer (&local_error));
                 }
+              else if (req->s3_range_part > 0 && response == 206 && req->s3_range_total == 0)
+                /* Also checked in s3_write(), but that never runs for an empty body. */
+                g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_FAILED,
+                                         "While fetching %s: ranged response without a usable "
+                                         "Content-Range",
+                                         eff_url);
               else if (req->s3_range_total > 0 && req->current_size != req->s3_range_first)
                 g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_FAILED,
                                          "While fetching %s: ranged response has %" G_GUINT64_FORMAT
@@ -1266,7 +1335,12 @@ check_multi_info (OstreeFetcher *fetcher)
       else if (req->s3_range_self_done)
         s3_range_parent_transfer_done (fetcher, task);
       else
-        request_finished (fetcher, task);
+        {
+          /* If this request failed with ranges of its object still running,
+           * stop them now rather than let them outlive it. */
+          s3_range_cancel_children (fetcher, req);
+          request_finished (fetcher, task);
+        }
     }
 }
 
@@ -1276,6 +1350,8 @@ timer_cb (gpointer data)
 {
   CURLMcode rc;
   OstreeFetcher *fetcher = data;
+  /* Completing requests can drop the last other reference to the fetcher. */
+  g_autoptr (OstreeFetcher) fetcher_ref = g_object_ref (fetcher);
   g_clear_pointer (&fetcher->timer_event, destroy_and_unref_source);
   rc = curl_multi_socket_action (fetcher->multi, CURL_SOCKET_TIMEOUT, 0, &fetcher->curl_running);
   g_assert_cmpint (rc, ==, CURLM_OK);
@@ -1308,6 +1384,8 @@ event_cb (int fd, GIOCondition condition, gpointer data)
 {
   OstreeFetcher *fetcher = data;
   CURLMcode rc;
+  /* Completing requests can drop the last other reference to the fetcher. */
+  g_autoptr (OstreeFetcher) fetcher_ref = g_object_ref (fetcher);
 
   int action
       = (condition & G_IO_IN ? CURL_CSELECT_IN : 0) | (condition & G_IO_OUT ? CURL_CSELECT_OUT : 0);

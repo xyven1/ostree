@@ -316,6 +316,10 @@ tests_test_fetcher_s3_SOURCES = \
 	tests/test-fetcher-s3.c
 tests_test_fetcher_s3_CFLAGS = $(TESTS_CFLAGS) $(libglnx_cflags) $(AWS_CFLAGS)
 tests_test_fetcher_s3_LDADD = $(TESTS_LDADD) $(AWS_LIBS)
+test_extra_programs += tests/s3-pull-repeat
+tests_s3_pull_repeat_SOURCES = tests/s3-pull-repeat.c
+tests_s3_pull_repeat_CFLAGS = $(TESTS_CFLAGS)
+tests_s3_pull_repeat_LDADD = $(TESTS_LDADD)
 endif
 
 if USE_LIBSOUP_OR_LIBSOUP3

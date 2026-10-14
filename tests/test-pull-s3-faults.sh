@@ -29,7 +29,7 @@ if ! command -v python3 >/dev/null; then
     skip "python3 is required"
 fi
 
-echo '1..14'
+echo '1..16'
 
 cd ${test_tmpdir}
 . $(dirname $0)/libtest-s3.sh
@@ -230,3 +230,29 @@ timeout 120 ${CMD_PREFIX} ostree --repo=repo14 pull --disable-static-deltas \
     || fatal "pull with --max-outstanding-fetcher-requests=0 failed or hung (status $?)"
 assert_streq "$(${CMD_PREFIX} ostree --repo=repo14 rev-parse main)" "${rev}"
 echo "ok request limit of 0"
+
+# 15: an empty 206 to the first range, with no Content-Range
+assert_trusted_mirror_rejects mirror15 firstempty
+echo "ok empty first range rejected"
+
+# 16: a first range that drops while its other ranges are still downloading.
+# Run several such pulls in one process, as a long-lived library user would:
+# no range may outlive its pull (to free things underneath it later, or to
+# keep its temporary file open). Under valgrind when available, since a
+# use-after-free does not always crash.
+set_mode firstdrop
+repeat_cmd=(${test_builddir}/s3-pull-repeat ${test_tmpdir} "${s3url}" 3)
+if command -v valgrind >/dev/null; then
+    # The helper is a libtool wrapper script; run valgrind on the real binary.
+    repeat_cmd=(${top_builddir}/libtool --mode=execute valgrind -q --error-exitcode=99
+                --suppressions=${test_srcdir}/glib.supp --suppressions=${test_srcdir}/ostree.supp
+                "${repeat_cmd[@]}")
+fi
+rc=0
+G_SLICE=always-malloc MALLOC_PERTURB_=165 "${repeat_cmd[@]}" > repeat.log 2>&1 || rc=$?
+if test ${rc} -ne 0; then
+    cat repeat.log
+    fatal "in-process pulls failed with status ${rc}"
+fi
+assert_file_has_content repeat.log "no temporary files left open"
+echo "ok no range outlives a failed pull"

@@ -3530,6 +3530,7 @@ all_requested_refs_have_commit (
  *   * `retry-all-network-errors` (`b`): Retry when network issues happen, instead of
  *      failing automatically. Currently only affects libcurl. (Default set to true)
  *   * `max-outstanding-fetcher-requests` (`u`): The max amount of concurrent connections allowed.
+ *     0 means the default.
  *   * `ref-keyring-map` (`a(sss)`): Array of (collection ID, ref name, keyring
  *     remote name) tuples specifying which remote's keyring should be used when
  *     doing GPG verification of each collection-ref. This is useful to prevent a

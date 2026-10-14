@@ -34,6 +34,7 @@
             minio
             minio-client
             python3
+            valgrind
           ];
         };
       });

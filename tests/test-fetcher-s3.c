@@ -373,6 +373,16 @@ test_sign_port (void)
                    find_header (no_port, "Authorization"));
   g_assert_cmpstr (find_header (with_port, "Authorization"), !=,
                    find_header (no_port, "Authorization"));
+
+  /* An IPv6 host is signed with its brackets, as curl sends it. The expected
+   * value comes from an independent SigV4 implementation. */
+  g_autoptr (GPtrArray) ipv6 = g_ptr_array_new_with_free_func (g_free);
+  _ostree_aws_sign_get_at (creds, "http://[::1]:9000/b/k", "us-east-1", 1, ipv6, &error);
+  g_assert_no_error (error);
+  g_assert_cmpstr (find_header (ipv6, "Authorization"), ==,
+                   "AWS4-HMAC-SHA256 Credential=AK/19700101/us-east-1/s3/aws4_request, "
+                   "SignedHeaders=host;x-amz-content-sha256;x-amz-date, "
+                   "Signature=0ad15a262c6dd98edd8c96884cc8604ee931d64885b48d2b6bf3ed786959868c");
 }
 
 static void

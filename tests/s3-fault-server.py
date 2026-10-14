@@ -24,12 +24,17 @@
 #                a correct Content-Range but only 1000 bytes of body
 #   childshifted answer ranged requests that do not start at 0 with the range
 #                one byte earlier, correctly labelled in Content-Range
+#   firstempty   answer the first range of a larger object with an empty 206
+#                and no Content-Range
+#   firstdrop    for objects over 4 MiB: send 1 MiB of the first range, then
+#                hang up; answer the other ranges only after 5 seconds
 #
 # Every request is appended to LOG as "<start>-<end|*> <if-match|-> <path>".
 
 import http.server
 import os
 import sys
+import time
 
 root, mode_file, log_file, port = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
 root = os.path.realpath(root)
@@ -96,6 +101,30 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         if child and mode == "childshifted":
             start, end = start - 1, end - 1
+
+        if mode == "firstdrop" and ranged and size > 4194304:
+            if child:
+                time.sleep(5)
+            else:
+                self.send_response(206)
+                self.send_header("Content-Length", str(end - start + 1))
+                self.send_header("Content-Range", "bytes %d-%d/%d" % (start, end, size))
+                self.send_header("ETag", etag)
+                self.end_headers()
+                with open(full, "rb") as f:
+                    self.wfile.write(f.read(1048576))
+                self.wfile.flush()
+                time.sleep(1)
+                self.close_connection = True
+                self.connection.close()
+                return
+
+        if first and mode == "firstempty" and end + 1 < size:
+            self.send_response(206)
+            self.send_header("Content-Length", "0")
+            self.send_header("ETag", etag)
+            self.end_headers()
+            return
 
         if first and mode == "firstshort" and end + 1 < size:
             body = open(full, "rb").read(1000)
