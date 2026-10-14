@@ -181,6 +181,7 @@ struct FetcherRequest
   guint64 s3_range_offset;     /* child: first byte to fetch */
   guint64 s3_range_length;     /* child: number of bytes to fetch */
   guint64 s3_range_written;    /* child: bytes written so far */
+  gboolean s3_range_confirmed; /* child: Content-Range is exactly the range asked for */
 };
 
 /* Information associated with a specific socket */
@@ -883,7 +884,8 @@ s3_write (FetcherRequest *req, GTask *task, const void *ptr, size_t realsize, si
   if (req->s3_range_parent != NULL)
     {
       FetcherRequest *preq = g_task_get_task_data (req->s3_range_parent);
-      if (response != 206 || req->s3_range_written + realsize > req->s3_range_length)
+      if (response != 206 || !req->s3_range_confirmed
+          || req->s3_range_written + realsize > req->s3_range_length)
         {
           req->caught_write_error
               = g_error_new (G_IO_ERROR, G_IO_ERROR_FAILED,
@@ -909,6 +911,16 @@ s3_write (FetcherRequest *req, GTask *task, const void *ptr, size_t realsize, si
       req->s3_range_written += realsize;
       req->fetcher->bytes_transferred += realsize;
       *out_ret = realsize;
+      return TRUE;
+    }
+
+  /* We asked for the first part only, so a 206 must say which bytes it holds;
+   * otherwise it could be taken for the whole object. */
+  if (req->s3_range_part > 0 && response == 206 && req->s3_range_total == 0)
+    {
+      req->caught_write_error = g_error_new (G_IO_ERROR, G_IO_ERROR_FAILED,
+                                             "Ranged response without a usable Content-Range");
+      *out_ret = (size_t)-1;
       return TRUE;
     }
 
@@ -970,6 +982,15 @@ s3_header (FetcherRequest *req, const char *line)
                 "Object exceeded maximum size of %" G_GUINT64_FORMAT " bytes", req->max_size);
         }
     }
+  else if (req->s3_range_parent != NULL
+           && g_ascii_strncasecmp (line, content_range_header, strlen (content_range_header)) == 0)
+    {
+      guint64 start, end, total;
+      req->s3_range_confirmed = _ostree_s3_parse_content_range (
+                                    line + strlen (content_range_header), &start, &end, &total)
+                                && start == req->s3_range_offset
+                                && end == req->s3_range_offset + req->s3_range_length - 1;
+    }
 }
 
 /* Prepare an attempt at an s3:// mirror: sign it and add any Range headers.
@@ -983,7 +1004,6 @@ s3_begin_attempt (OstreeFetcher *self, FetcherRequest *req, GTask *task, GUri *b
   gboolean parked = FALSE;
 
   /* Every attempt is signed afresh; never resend a stale signature. */
-  g_clear_pointer (&req->req_headers, curl_slist_free_all);
   g_clear_pointer (&req->s3_creds, _ostree_aws_credentials_unref);
   g_clear_pointer (&req->s3_bucket_region, g_free);
   if (req->s3_error_body)
@@ -1015,6 +1035,7 @@ s3_begin_attempt (OstreeFetcher *self, FetcherRequest *req, GTask *task, GUri *b
       g_autofree char *if_match = g_strconcat ("If-Match: ", preq->out_etag, NULL);
       req->req_headers = curl_slist_append (req->req_headers, if_match);
       req->s3_range_written = 0;
+      req->s3_range_confirmed = FALSE;
     }
   else if (s3_range_eligible (req))
     {
@@ -1218,6 +1239,11 @@ check_multi_info (OstreeFetcher *fetcher)
                   glnx_set_error_from_errno (error);
                   g_task_return_error (task, g_steal_pointer (&local_error));
                 }
+              else if (req->s3_range_total > 0 && req->current_size != req->s3_range_first)
+                g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_FAILED,
+                                         "While fetching %s: ranged response has %" G_GUINT64_FORMAT
+                                         " bytes, expected %" G_GUINT64_FORMAT,
+                                         eff_url, req->current_size, req->s3_range_first);
               else if (req->s3_range_pending || req->s3_range_children > 0
                        || req->s3_range_error != NULL)
                 {
@@ -1627,6 +1653,9 @@ initiate_next_curl_request (FetcherRequest *req, GTask *task)
 
   /* The old handle must go before anything it points at is freed below. */
   g_clear_pointer (&req->easy, curl_easy_cleanup);
+  /* Headers are rebuilt for every attempt, so none carry over from the last one
+   * (signed S3 headers in particular must never go to another mirror). */
+  g_clear_pointer (&req->req_headers, curl_slist_free_all);
 
   g_assert_cmpint (req->idx, <, req->mirrorlist->len);
 

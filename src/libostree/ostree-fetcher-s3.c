@@ -96,9 +96,12 @@ normalize_endpoint (const char *value)
     return NULL;
   if (!(*path == '\0' || g_str_equal (path, "/")))
     return NULL;
+  /* GUri returns IPv6 literals without their brackets */
+  g_autofree char *host_part
+      = strchr (host, ':') != NULL ? g_strdup_printf ("[%s]", host) : g_strdup (host);
   if (g_uri_get_port (u) != -1)
-    return g_strdup_printf ("%s://%s:%d", scheme, host, g_uri_get_port (u));
-  return g_strdup_printf ("%s://%s", scheme, host);
+    return g_strdup_printf ("%s://%s:%d", scheme, host_part, g_uri_get_port (u));
+  return g_strdup_printf ("%s://%s", scheme, host_part);
 }
 
 OstreeS3Location *
@@ -124,6 +127,9 @@ _ostree_s3_location_parse (GUri *uri, GError **error)
   g_autoptr (OstreeS3Location) loc = g_new0 (OstreeS3Location, 1);
   loc->bucket = g_strdup (host);
 
+  /* An encoded slash would be decoded into a path separator. */
+  if (strstr (g_uri_get_path (uri), "%2F") != NULL || strstr (g_uri_get_path (uri), "%2f") != NULL)
+    return throw_invalid (error, uri_str, "an encoded '/' (%%2F) is not allowed in the path");
   g_autofree char *path = g_uri_unescape_string (g_uri_get_path (uri), NULL);
   if (path == NULL)
     return throw_invalid (error, uri_str, "invalid percent-encoding in path");

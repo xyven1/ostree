@@ -18,6 +18,12 @@
 #   weaketag     send a weak ETag (W/"...")
 #   etagchange   answer 412 to requests whose If-Match is not the "new" ETag,
 #                and serve such requests anyway if they carry no If-Match
+#   firstnorange answer the first range of an object with a 206 but no
+#                Content-Range header
+#   firstshort   for the first range of an object larger than that range, send
+#                a correct Content-Range but only 1000 bytes of body
+#   childshifted answer ranged requests that do not start at 0 with the range
+#                one byte earlier, correctly labelled in Content-Range
 #
 # Every request is appended to LOG as "<start>-<end|*> <if-match|-> <path>".
 
@@ -63,6 +69,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         with open(log_file, "a") as f:
             f.write("%d-%s %s %s\n" % (start, end if ranged else "*", if_match or "-", rel))
         child = ranged and start > 0
+        first = ranged and start == 0
 
         etag = '"v1-%d"' % size
         if mode == "weaketag":
@@ -87,10 +94,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
             ranged = False
             start, end = 0, size - 1
 
+        if child and mode == "childshifted":
+            start, end = start - 1, end - 1
+
+        if first and mode == "firstshort" and end + 1 < size:
+            body = open(full, "rb").read(1000)
+            self.send_response(206)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Content-Range", "bytes %d-%d/%d" % (start, end, size))
+            self.send_header("ETag", etag)
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
         length = end - start + 1
         self.send_response(206 if ranged else 200)
         self.send_header("Content-Length", str(length))
-        if ranged:
+        if ranged and not (first and mode == "firstnorange"):
             self.send_header("Content-Range", "bytes %d-%d/%d" % (start, end, size))
         if mode != "noetag":
             self.send_header("ETag", etag)

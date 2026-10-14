@@ -29,7 +29,7 @@ if ! command -v python3 >/dev/null; then
     skip "python3 is required"
 fi
 
-echo '1..10'
+echo '1..14'
 
 cd ${test_tmpdir}
 . $(dirname $0)/libtest-s3.sh
@@ -197,3 +197,36 @@ ${CMD_PREFIX} ostree --repo=mirror10 pull --mirror --http-trusted --disable-stat
 ${CMD_PREFIX} ostree --repo=mirror10 fsck >/dev/null
 test "$(count_big_objects mirror10)" -eq 1 || fatal "big object missing from mirror after recovery"
 echo "ok trusted mirror never links a partial file"
+
+# For the unverified --http-trusted path: a pull under a malformed response
+# must fail and must not link the big object into the mirror.
+assert_trusted_mirror_rejects () {
+    new_client_repo $1 --mode=archive
+    set_mode $2
+    if ${CMD_PREFIX} ostree --repo=$1 pull --mirror --http-trusted --disable-static-deltas \
+                     --network-retries=0 origin main 2>err.txt; then
+        fatal "trusted mirror pull succeeded in mode $2"
+    fi
+    test "$(count_big_objects $1)" -eq 0 || fatal "a corrupt object was linked into $1 (mode $2)"
+}
+
+# 11: a first range answered 206 without saying which bytes it holds
+assert_trusted_mirror_rejects mirror11 firstnorange
+echo "ok first range without Content-Range rejected"
+
+# 12: a first range whose body is shorter than its Content-Range says
+assert_trusted_mirror_rejects mirror12 firstshort
+echo "ok short first range rejected"
+
+# 13: a follow-up range that is a different range from the one requested
+assert_trusted_mirror_rejects mirror13 childshifted
+echo "ok mislabelled follow-up range rejected"
+
+# 14: a request limit of 0 means "use the default", not "never start"
+new_client_repo repo14
+set_mode ok
+timeout 120 ${CMD_PREFIX} ostree --repo=repo14 pull --disable-static-deltas \
+    --max-outstanding-fetcher-requests=0 origin main \
+    || fatal "pull with --max-outstanding-fetcher-requests=0 failed or hung (status $?)"
+assert_streq "$(${CMD_PREFIX} ostree --repo=repo14 rev-parse main)" "${rev}"
+echo "ok request limit of 0"

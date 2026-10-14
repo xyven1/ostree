@@ -81,7 +81,7 @@ connection is often much slower than the link as a whole. So for `s3://`
 remotes:
 
 - up to 128 requests run at once, rather than 8 (set
-  `--max-outstanding-fetcher-requests` to override);
+  `--max-outstanding-fetcher-requests` to override; 0 means the default);
 - up to 16 static-delta parts download at once, rather than 2, while at most
   2 are decompressed and applied at a time, as before;
 - objects larger than 4 MiB are fetched as parallel 4 MiB ranges written into
@@ -99,11 +99,13 @@ transfer problem can fail a pull but cannot store a wrong object. Ranged
 fetching keeps this true for the one path that stores fetched files without
 checksumming them, mirroring into an archive repo with `--http-trusted`:
 
-- each range must be a complete 206 response of exactly the requested size;
+- every ranged response, the first included, must be a 206 whose
+  `Content-Range` names exactly the bytes asked for, with a body of exactly
+  that length;
 - ranges are only used when the first response carries a strong ETag, which
   every later range must match through `If-Match`, so an object replaced
   mid-download is never assembled from two versions;
-- the finished file's size is checked before use;
+- the finished file's size is checked against the object's advertised size;
 - a failed range fails the whole object, and its temporary file is discarded.
 
 Checksums only prove that objects match the commit that was fetched. To know

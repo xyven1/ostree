@@ -94,6 +94,9 @@ test_parse_rejects (void)
   assert_rejected ("s3://my-bucket/repo?endpoint=ftp://h", "endpoint must look like");
   assert_rejected ("s3://my-bucket/repo?endpoint=http://h/sub/path", "endpoint must look like");
   assert_rejected ("s3://my-bucket/repo?endpoint=http://u@h", "endpoint must look like");
+  /* an encoded slash would silently become a path separator */
+  assert_rejected ("s3://my-bucket/re%2Fpo", "%2F");
+  assert_rejected ("s3://my-bucket/re%2fpo", "%2F");
 }
 
 static void
@@ -109,6 +112,9 @@ test_url_addressing (void)
               "summary", "http://127.0.0.1:9000/b1/repo/summary");
   assert_url ("s3://my-bucket/repo?endpoint=https://vpce.example.com", NULL, "summary",
               "https://vpce.example.com/my-bucket/repo/summary");
+  /* IPv6 endpoints keep their brackets */
+  assert_url ("s3://b1/repo?endpoint=http://[::1]:9000", NULL, "config",
+              "http://[::1]:9000/b1/repo/config");
 }
 
 /* Legacy bucket names must not produce a broken hostname. */
@@ -159,6 +165,10 @@ test_url_slashes (void)
   assert_url ("s3://my-bucket/repo/", "us-east-1", "config", expected);
   assert_url ("s3://my-bucket//repo//", "us-east-1", "/config", expected);
   assert_url ("s3://my-bucket/repo", "us-east-1", "//config", expected);
+  /* The URI parser removes dot segments, encoded or not, so none reach the
+   * request (where curl would remove them after signing). */
+  assert_url ("s3://my-bucket/./repo", "us-east-1", "config", expected);
+  assert_url ("s3://my-bucket/x/%2E%2E/repo", "us-east-1", "config", expected);
 
   assert_url ("s3://my-bucket", "us-east-1", NULL, "https://my-bucket.s3.us-east-1.amazonaws.com/");
   assert_url ("s3://my-bucket/", "us-east-1", "", "https://my-bucket.s3.us-east-1.amazonaws.com/");

@@ -561,8 +561,11 @@ _ostree_aws_sign_get_at (OstreeAwsCredentials *creds, const char *url, const cha
   const int port = g_uri_get_port (uri);
   const gboolean default_port = port == -1 || (port == 443 && g_str_equal (scheme, "https"))
                                 || (port == 80 && g_str_equal (scheme, "http"));
-  g_autofree char *host = default_port ? g_strdup (g_uri_get_host (uri))
-                                       : g_strdup_printf ("%s:%d", g_uri_get_host (uri), port);
+  /* GUri returns IPv6 literals without their brackets */
+  const char *h = g_uri_get_host (uri);
+  g_autofree char *host_name = strchr (h, ':') != NULL ? g_strdup_printf ("[%s]", h) : g_strdup (h);
+  g_autofree char *host
+      = default_port ? g_strdup (host_name) : g_strdup_printf ("%s:%d", host_name, port);
   const char *path = g_uri_get_path (uri);
   const char *query = g_uri_get_query (uri);
   g_autofree char *path_and_query = query ? g_strdup_printf ("%s?%s", *path ? path : "/", query)

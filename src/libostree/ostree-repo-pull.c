@@ -3663,6 +3663,9 @@ ostree_repo_pull_with_options (OstreeRepo *self, const char *remote_name_or_base
       opt_max_outstanding_fetcher_requests_set
           = g_variant_lookup (options, "max-outstanding-fetcher-requests", "u",
                               &pull_data->max_outstanding_fetcher_requests);
+      /* A limit of 0 would never start a request; treat it as unset. */
+      if (pull_data->max_outstanding_fetcher_requests == 0)
+        opt_max_outstanding_fetcher_requests_set = FALSE;
       opt_n_network_retries_set
           = g_variant_lookup (options, "n-network-retries", "u", &pull_data->n_network_retries);
       opt_ref_keyring_map_set
@@ -6467,6 +6470,8 @@ ostree_repo_remote_fetch_summary_with_options (OstreeRepo *self, const char *nam
       (void)g_variant_lookup (options, "retry-all-network-errors", "b", &retry_all);
       (void)g_variant_lookup (options, "max-outstanding-fetcher-requests", "u",
                               &max_outstanding_fetcher_requests);
+      if (max_outstanding_fetcher_requests == 0)
+        max_outstanding_fetcher_requests = OPT_OSTREE_MAX_OUTSTANDING_FETCHER_REQUESTS_DEFAULT;
     }
 
   if (!ostree_repo_remote_get_gpg_verify_summary (self, name, &gpg_verify_summary, error))
