@@ -436,11 +436,21 @@ ot_static_delta_builtin_generate (int argc, char **argv, OstreeCommandInvocation
         g_variant_builder_add (parambuilder, "{sv}", "private-sources",
                                g_variant_new_boolean (TRUE));
       if (opt_effort)
-        g_variant_builder_add (parambuilder, "{sv}", "effort",
-                               g_variant_new_uint32 (g_ascii_strtoull (opt_effort, NULL, 10)));
+        {
+          guint64 effort;
+          if (!g_ascii_string_to_unsigned (opt_effort, 10, 0, G_MAXUINT32, &effort, error))
+            return glnx_prefix_error (error, "Invalid --effort");
+          g_variant_builder_add (parambuilder, "{sv}", "effort",
+                                 g_variant_new_uint32 ((guint32)effort));
+        }
       if (opt_threads)
-        g_variant_builder_add (parambuilder, "{sv}", "threads",
-                               g_variant_new_uint32 (g_ascii_strtoull (opt_threads, NULL, 10)));
+        {
+          guint64 threads;
+          if (!g_ascii_string_to_unsigned (opt_threads, 10, 0, 4096, &threads, error))
+            return glnx_prefix_error (error, "Invalid --threads");
+          g_variant_builder_add (parambuilder, "{sv}", "threads",
+                                 g_variant_new_uint32 ((guint32)threads));
+        }
       if (opt_inline)
         g_variant_builder_add (parambuilder, "{sv}", "inline-parts", g_variant_new_boolean (TRUE));
       if (opt_filename)

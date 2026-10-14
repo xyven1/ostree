@@ -169,8 +169,13 @@ AC_ARG_WITH([hdiffpatch],
   [AS_HELP_STRING([--with-hdiffpatch], [Enable bulk static deltas using the bundled HDiffPatch @<:@default=auto@:>@])],
   [], [with_hdiffpatch=auto])
 AS_IF([test x$with_hdiffpatch != xno], [
-  AS_IF([test -f "$srcdir/hdiffpatch/libHDiffPatch/HDiff/diff.h" && test "x$CXX" != x && test "x$CXX" != xno],
-    [have_hdiffpatch=yes], [have_hdiffpatch=no])
+  dnl AC_PROG_CXX sets CXX even when there is no C++ compiler, so try one
+  AS_IF([test -f "$srcdir/hdiffpatch/libHDiffPatch/HDiff/diff.h"], [
+    AC_LANG_PUSH([C++])
+    AC_LINK_IFELSE([AC_LANG_PROGRAM([[#include <vector>]], [[std::vector<int> v; v.push_back (1);]])],
+      [have_hdiffpatch=yes], [have_hdiffpatch=no])
+    AC_LANG_POP([C++])
+  ], [have_hdiffpatch=no])
   AS_IF([test x$have_hdiffpatch = xno && test x$with_hdiffpatch = xyes],
     [AC_MSG_ERROR([--with-hdiffpatch was given, but the hdiffpatch submodule or a C++ compiler is missing])])
   with_hdiffpatch=$have_hdiffpatch

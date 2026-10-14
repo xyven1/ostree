@@ -282,12 +282,14 @@ concat_read (gpointer user_data, guint64 pos, guint8 *buf, gsize len)
   return ret;
 }
 
+#ifdef HAVE_HDIFFPATCH
 static OtHdiffInput
 concat_as_input (Concat *self)
 {
   OtHdiffInput in = { self->size, concat_read, self };
   return in;
 }
+#endif
 
 /* Turn a failure of something reading from @self into the underlying error */
 static gboolean
@@ -1410,7 +1412,11 @@ _ostree_static_delta_bulk_generate (OstreeRepo *repo, const char *from, const ch
 
   g_autoptr (GStringChunk) names = g_string_chunk_new (4096);
 
-  /* Basenames, and fuzzy names, of regular files that are gone in the target */
+  /* Gone regular files that can be diffed against (see generator_load_old_file()),
+   * by checksum, and their basenames and fuzzy names.  A file that cannot be a
+   * source must not draw new files to the precise differ by its name.
+   */
+  g_autoptr (GHashTable) gone_usable = g_hash_table_new_full (g_str_hash, g_str_equal, NULL, g_free);
   g_autoptr (GHashTable) gone_basenames = g_hash_table_new (g_str_hash, g_str_equal);
   /* The names by which new regular files were matched to gone ones */
   g_autoptr (GHashTable) mod_basenames = g_hash_table_new (g_str_hash, g_str_equal);
@@ -1421,11 +1427,19 @@ _ostree_static_delta_bulk_generate (OstreeRepo *repo, const char *from, const ch
   gpointer key, value;
   g_hash_table_iter_init (&iter, from_contents.files);
   while (g_hash_table_iter_next (&iter, &key, &value))
-    if (!g_hash_table_contains (to_contents.files, key))
-      {
-        g_hash_table_add (gone_basenames, (char *)path_basename (value));
-        g_hash_table_add (gone_basenames, (char *)fuzzy_name (names, value));
-      }
+    {
+      if (g_hash_table_contains (to_contents.files, key))
+        continue;
+      g_autofree StreamObject *obj = g_new0 (StreamObject, 1);
+      gboolean usable;
+      if (!generator_load_old_file (&gen, key, value, obj, &usable, cancellable, error))
+        goto out;
+      if (!usable)
+        continue;
+      g_hash_table_insert (gone_usable, key, g_steal_pointer (&obj));
+      g_hash_table_add (gone_basenames, (char *)path_basename (value));
+      g_hash_table_add (gone_basenames, (char *)fuzzy_name (names, value));
+    }
 
   /* New metadata.  The commit object itself travels in the superblock. */
   struct
@@ -1515,6 +1529,9 @@ _ostree_static_delta_bulk_generate (OstreeRepo *repo, const char *from, const ch
     {
       const char *basename = path_basename (value);
       const gboolean gone = !g_hash_table_contains (to_contents.files, key);
+      const StreamObject *gone_obj = gone ? g_hash_table_lookup (gone_usable, key) : NULL;
+      if (gone && gone_obj == NULL)
+        continue;
       gboolean in_mod = FALSE;
       if (gone)
         {
@@ -1529,6 +1546,11 @@ _ostree_static_delta_bulk_generate (OstreeRepo *repo, const char *from, const ch
         target = add_old;
       if (target == NULL)
         continue;
+      if (gone_obj != NULL)
+        {
+          g_array_append_vals (target, gone_obj, 1);
+          continue;
+        }
       StreamObject obj = {
         0,
       };
@@ -1861,12 +1883,10 @@ stream_sink_finish_object (StreamSink *self, GError **error)
   else
     {
       char actual_checksum[OSTREE_SHA256_STRING_LEN + 1];
+      /* This verifies the checksum given to _ostree_repo_bare_content_open() */
       if (!_ostree_repo_bare_content_commit (self->repo, &self->content_out, actual_checksum,
                                              sizeof (actual_checksum), self->cancellable, error))
         return FALSE;
-      if (strcmp (actual_checksum, self->checksum) != 0)
-        return glnx_throw (error, "Corrupted object %s (actual checksum is %s)", self->checksum,
-                           actual_checksum);
       _ostree_repo_bare_content_cleanup (&self->content_out);
     }
 
@@ -1918,6 +1938,7 @@ stream_sink_write_inner (StreamSink *self, const guint8 *buf, gsize len, GError 
   return TRUE;
 }
 
+#ifdef HAVE_HDIFFPATCH
 static gboolean
 stream_sink_write (gpointer user_data, const guint8 *buf, gsize len)
 {
@@ -1957,6 +1978,7 @@ diff_reader_read (gpointer user_data, guint64 pos, guint8 *buf, gsize len)
   self->pos += n;
   return TRUE;
 }
+#endif /* HAVE_HDIFFPATCH */
 
 gboolean
 _ostree_static_delta_bulk_part_execute (OstreeRepo *repo, GVariant *objects, GVariant *part,

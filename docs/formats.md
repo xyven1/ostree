@@ -292,7 +292,12 @@ all work unchanged.  Their limitations:
 
  - They need a client built with hdiffpatch support, and with zstd
    support for efforts below 8 (`ostree --version` lists `hdiffpatch`
-   and `zstd`).  Other clients fail cleanly on the unknown part type.
+   and `zstd`).  Nothing in the superblock marks a delta as bulk: a
+   client without that support, or with an `archive` repository, only
+   finds out when it reads the first part, and the pull or
+   `apply-offline` then fails.  It does not fall back to fetching
+   objects.  Only publish bulk deltas where every client that may use
+   them can apply them.
  - They can only be applied to `bare`, `bare-user` and
    `bare-user-only` repositories, because the old stream is read
    directly from the stored objects.

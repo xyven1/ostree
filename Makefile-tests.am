@@ -430,7 +430,7 @@ tests_test_hdiff_SOURCES = tests/test-hdiff.c
 # See the note on nodist_EXTRA_libostree_1_la_SOURCES
 nodist_EXTRA_tests_test_hdiff_SOURCES = tests/test-dummy-cxx-link.cxx
 tests_test_hdiff_CFLAGS = $(TESTS_CFLAGS)
-tests_test_hdiff_LDADD = libhdiffpatch.la $(TESTS_LDADD)
+tests_test_hdiff_LDADD = libostree-hdiff.la $(TESTS_LDADD)
 endif
 
 tests_test_rfc2616_dates_SOURCES = \

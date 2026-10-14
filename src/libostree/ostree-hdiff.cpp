@@ -212,6 +212,11 @@ _ostree_hdiff_create_block (const OtHdiffInput *old_in, const OtHdiffInput *new_
       g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED, "hdiff generation failed: %s", e.what ());
       return FALSE;
     }
+  catch (...)
+    {
+      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED, "hdiff generation failed");
+      return FALSE;
+    }
   return TRUE;
 }
 
@@ -248,6 +253,11 @@ _ostree_hdiff_create_stream (const OtHdiffInput *old_in, const OtHdiffInput *new
       else
         g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED, "hdiff generation failed: %s",
                      e.what ());
+      return FALSE;
+    }
+  catch (...)
+    {
+      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED, "hdiff generation failed");
       return FALSE;
     }
 

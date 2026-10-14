@@ -294,6 +294,13 @@ if ${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to
     assert_not_reached "--effort=10 unexpectedly succeeded"
 fi
 assert_file_has_content err.txt "Invalid 'effort'"
+for opt in --effort=fast --effort= --threads=abc --threads=-1; do
+    if ${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} \
+                     --bulk ${opt} --filename=deltas/bad 2>err.txt; then
+        assert_not_reached "${opt} unexpectedly succeeded"
+    fi
+    assert_file_has_content err.txt "Invalid --"
+done
 if ${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} \
                  --effort=3 --filename=deltas/bad 2>err.txt; then
     assert_not_reached "--effort without --bulk unexpectedly succeeded"

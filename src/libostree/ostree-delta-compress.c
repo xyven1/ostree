@@ -30,10 +30,11 @@
 #define IO_BUF_SIZE (1024 * 1024)
 
 /* Largest window/dictionary we will ever decode: bounds decompression memory
- * for untrusted input.  The generator never exceeds 2^26 (64MiB).
+ * for untrusted input.  The generator never exceeds it (128 MiB).
  */
 #define MAX_WINDOW_LOG 27
-#define XZ_DECODER_MEMLIMIT (G_GUINT64_CONSTANT (1) << 30)
+/* An LZMA2 decoder needs its dictionary plus well under a megabyte */
+#define XZ_DECODER_MEMLIMIT ((G_GUINT64_CONSTANT (1) << MAX_WINDOW_LOG) + (16 << 20))
 
 static gboolean
 throw_lzma (lzma_ret r, const char *what, GError **error)
@@ -71,6 +72,16 @@ compress_xz (const OtDeltaCompressOptions *options, OtDeltaReadFunc read, gpoint
     return glnx_throw (error, "Invalid xz preset %d", options->level);
   if (options->window_log > 0)
     lzma_opts.dict_size = ((uint32_t)1) << CLAMP (options->window_log, 12, MAX_WINDOW_LOG);
+  /* The decoder allocates the whole dictionary, so a small input should not
+   * declare a large one.  (zstd does this itself given the input size.)
+   */
+  if (options->src_size_known)
+    {
+      uint32_t fit = 1 << 12;
+      while (fit < options->src_size && fit < lzma_opts.dict_size)
+        fit <<= 1;
+      lzma_opts.dict_size = MIN (lzma_opts.dict_size, fit);
+    }
 
   lzma_filter filters[] = { { .id = LZMA_FILTER_LZMA2, .options = &lzma_opts },
                             { .id = LZMA_VLI_UNKNOWN, .options = NULL } };

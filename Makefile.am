@@ -117,6 +117,9 @@ include bsdiff/Makefile-bsdiff.am.inc
 EXTRA_DIST += bsdiff/Makefile-bsdiff.am
 noinst_LTLIBRARIES += libbsdiff.la
 
+# Outside the conditional: automake derives dependency file paths from it
+# whether or not HDiffPatch is built.
+libhdiffpatch_srcpath = hdiffpatch
 if USE_HDIFFPATCH
 include Makefile-hdiffpatch.am
 endif
