@@ -99,6 +99,102 @@ License along with this library. If not, see <https://www.gnu.org/licenses/>.
             </varlistentry>
 
             <varlistentry>
+                <term><option>--bulk</option></term>
+
+                <listitem><para>
+                    Generate a bulk delta: rather than a delta per file, whole groups of
+                    objects, including directory metadata, are diffed against each other with
+                    HDiffPatch.  This is far faster to generate than the default scheme and
+                    produces much smaller deltas for updates.  Applying a bulk delta needs an
+                    ostree built with hdiffpatch support (and zstd support, except for efforts
+                    8 and 9), and a <literal>bare</literal>,
+                    <literal>bare-user</literal> or <literal>bare-user-only</literal> repository.
+                    The options <option>--min-fallback-size</option>,
+                    <option>--max-bsdiff-size</option>, <option>--max-chunk-size</option> and
+                    <option>--disable-bsdiff</option> have no effect on bulk deltas.
+                </para></listitem>
+            </varlistentry>
+
+            <varlistentry>
+                <term><option>--allow-private-sources</option></term>
+
+                <listitem><para>
+                    With <option>--bulk</option>, also compute the delta against files of the
+                    origin commit that are not world-readable.  By default such files are never used as the source of a
+                    delta, and their new versions are included whole; this guarantees that a
+                    delta can be applied even by a client that cannot read all of the objects
+                    in its repository, namely an unprivileged user whose repository has a
+                    root-owned <literal>bare</literal> parent repository.  Where updates are
+                    applied by root, or to a <literal>bare-user</literal> repository without
+                    such a parent, this option is safe and makes deltas smaller.
+                </para></listitem>
+            </varlistentry>
+
+            <varlistentry>
+                <term><option>--effort</option>=N</term>
+
+                <listitem>
+                    <para>
+                        With <option>--bulk</option>, trade generation time for size: from
+                        <literal>0</literal>, as fast as possible, to <literal>9</literal>, as
+                        small as possible.  The default is <literal>4</literal>.  For an
+                        ordinary update the effort barely matters, because a diff of a few
+                        megabytes or less is always compressed at the strongest setting; it
+                        matters when there is a lot of new content.
+                    </para>
+                    <variablelist>
+                        <varlistentry><term><literal>0</literal></term><listitem><para>
+                            zstd level 1.  Fastest; for local development loops.
+                        </para></listitem></varlistentry>
+                        <varlistentry><term><literal>1</literal>, <literal>2</literal></term><listitem><para>
+                            zstd levels 3 and 6.  About one eighth and one sixth smaller than
+                            <literal>0</literal> for little more time.
+                        </para></listitem></varlistentry>
+                        <varlistentry><term><literal>3</literal></term><listitem><para>
+                            zstd level 8 with long-distance matching in a 32 MiB window.  A
+                            quarter smaller than <literal>0</literal> at two to three times its
+                            time.
+                        </para></listitem></varlistentry>
+                        <varlistentry><term><literal>4</literal>, <literal>5</literal></term><listitem><para>
+                            zstd levels 10 and 12 with long-distance matching in a 128 MiB
+                            window.  <literal>4</literal>, the default, gives most of the size
+                            zstd can before the time climbs steeply.
+                        </para></listitem></varlistentry>
+                        <varlistentry><term><literal>6</literal>, <literal>7</literal></term><listitem><para>
+                            zstd levels 16 and 18, same window.  Five to ten times slower to
+                            generate than <literal>4</literal>; <literal>7</literal> is the
+                            smallest delta that still applies at full speed.
+                        </para></listitem></varlistentry>
+                        <varlistentry><term><literal>8</literal></term><listitem><para>
+                            xz preset 6 with a 32 MiB dictionary.  Smaller than any zstd
+                            effort, but two to three times slower to apply.
+                        </para></listitem></varlistentry>
+                        <varlistentry><term><literal>9</literal></term><listitem><para>
+                            xz preset 9 with a 128 MiB dictionary, as a single block.  The
+                            smallest delta; compressed on one thread, which takes minutes per
+                            gigabyte.
+                        </para></listitem></varlistentry>
+                    </variablelist>
+                    <para>
+                        Efforts 0 to 7 need an ostree built with zstd support to generate and
+                        apply.  Decompressing zstd costs the same at every level, so they
+                        differ only in the time to generate.  While applying, the client needs
+                        memory for the compression window: up to 32 MiB for efforts 0 to 3 and
+                        128 MiB above.
+                    </para>
+                </listitem>
+            </varlistentry>
+
+            <varlistentry>
+                <term><option>--threads</option>=N</term>
+
+                <listitem><para>
+                    With <option>--bulk</option>, the number of threads to use.  The default
+                    is one per processor.
+                </para></listitem>
+            </varlistentry>
+
+            <varlistentry>
                 <term><option>--max-usize</option>=SIZE</term>
 
                 <listitem><para>

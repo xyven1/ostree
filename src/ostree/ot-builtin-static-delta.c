@@ -35,6 +35,10 @@ static gboolean opt_empty;
 static gboolean opt_swap_endianness;
 static gboolean opt_inline;
 static gboolean opt_disable_bsdiff;
+static gboolean opt_bulk;
+static gboolean opt_allow_private_sources;
+static char *opt_effort;
+static char *opt_threads;
 static gboolean opt_if_not_exists;
 static char **opt_key_ids;
 static char *opt_sign_name;
@@ -85,6 +89,20 @@ static GOptionEntry generate_options[] = {
   { "inline", 0, 0, G_OPTION_ARG_NONE, &opt_inline, "Inline delta parts into main delta", NULL },
   { "to", 0, 0, G_OPTION_ARG_STRING, &opt_to_rev, "Create delta to revision REV", "REV" },
   { "disable-bsdiff", 0, 0, G_OPTION_ARG_NONE, &opt_disable_bsdiff, "Disable use of bsdiff", NULL },
+  { "bulk", 0, 0, G_OPTION_ARG_NONE, &opt_bulk,
+    "Generate a bulk delta: diff whole groups of objects with HDiffPatch instead of per-file "
+    "deltas (much faster and smaller; needs an ostree with hdiffpatch and zstd support to apply)",
+    NULL },
+  { "allow-private-sources", 0, 0, G_OPTION_ARG_NONE, &opt_allow_private_sources,
+    "With --bulk: also diff against files that are not world-readable (smaller deltas; cannot "
+    "be applied by a client that is unable to read all of its own objects)",
+    NULL },
+  { "effort", 0, 0, G_OPTION_ARG_STRING, &opt_effort,
+    "With --bulk: 0 (fastest to generate) to 9 (smallest); 0-7 use zstd and apply equally fast, "
+    "8-9 use xz and apply 2-3x slower.  Default 4",
+    "N" },
+  { "threads", 0, 0, G_OPTION_ARG_STRING, &opt_threads,
+    "With --bulk: number of threads (default: one per processor)", "N" },
   { "if-not-exists", 'n', 0, G_OPTION_ARG_NONE, &opt_if_not_exists,
     "Only generate if a delta does not already exist", NULL },
   { "set-endianness", 0, 0, G_OPTION_ARG_STRING, &opt_endianness,
@@ -406,6 +424,33 @@ ot_static_delta_builtin_generate (int argc, char **argv, OstreeCommandInvocation
       if (opt_disable_bsdiff)
         g_variant_builder_add (parambuilder, "{sv}", "bsdiff-enabled",
                                g_variant_new_boolean (FALSE));
+      if (opt_bulk)
+        g_variant_builder_add (parambuilder, "{sv}", "bulk", g_variant_new_boolean (TRUE));
+      else if (opt_effort)
+        return glnx_throw (error, "--effort requires --bulk");
+      else if (opt_threads)
+        return glnx_throw (error, "--threads requires --bulk");
+      else if (opt_allow_private_sources)
+        return glnx_throw (error, "--allow-private-sources requires --bulk");
+      if (opt_allow_private_sources)
+        g_variant_builder_add (parambuilder, "{sv}", "private-sources",
+                               g_variant_new_boolean (TRUE));
+      if (opt_effort)
+        {
+          guint64 effort;
+          if (!g_ascii_string_to_unsigned (opt_effort, 10, 0, G_MAXUINT32, &effort, error))
+            return glnx_prefix_error (error, "Invalid --effort");
+          g_variant_builder_add (parambuilder, "{sv}", "effort",
+                                 g_variant_new_uint32 ((guint32)effort));
+        }
+      if (opt_threads)
+        {
+          guint64 threads;
+          if (!g_ascii_string_to_unsigned (opt_threads, 10, 0, 4096, &threads, error))
+            return glnx_prefix_error (error, "Invalid --threads");
+          g_variant_builder_add (parambuilder, "{sv}", "threads",
+                                 g_variant_new_uint32 ((guint32)threads));
+        }
       if (opt_inline)
         g_variant_builder_add (parambuilder, "{sv}", "inline-parts", g_variant_new_boolean (TRUE));
       if (opt_filename)
