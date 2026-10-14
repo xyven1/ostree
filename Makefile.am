@@ -117,9 +117,20 @@ include bsdiff/Makefile-bsdiff.am.inc
 EXTRA_DIST += bsdiff/Makefile-bsdiff.am
 noinst_LTLIBRARIES += libbsdiff.la
 
-# Outside the conditional: automake derives dependency file paths from it
-# whether or not HDiffPatch is built.
+# HDiffPatch (see Makefile-hdiffpatch.am).  The path, and what is distributed,
+# are outside the conditional: automake derives dependency file paths from the
+# path, and distributes the sources in every configuration, so the headers and
+# licence must go too.
 libhdiffpatch_srcpath = hdiffpatch
+# The sources below are distributed automatically, the headers they include are not.
+# Whole directories are copied, so drop what an in-tree build left in them.
+EXTRA_DIST += $(libhdiffpatch_srcpath)/LICENSE $(libhdiffpatch_srcpath)/README.md \
+	$(libhdiffpatch_srcpath)/libHDiffPatch $(libhdiffpatch_srcpath)/libParallel
+dist-hook: dist-hook-hdiffpatch
+dist-hook-hdiffpatch:
+	find $(distdir)/$(libhdiffpatch_srcpath) \( -name '*.o' -o -name '*.lo' -o -name .deps \
+	  -o -name .libs -o -name .dirstamp \) -prune -exec rm -rf {} +
+.PHONY: dist-hook-hdiffpatch
 if USE_HDIFFPATCH
 include Makefile-hdiffpatch.am
 endif

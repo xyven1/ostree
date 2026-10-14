@@ -196,6 +196,8 @@ AS_IF([test x$with_hdiffpatch != xno], [
 AS_IF([test x$with_hdiffpatch = xyes], [
   AC_DEFINE([HAVE_HDIFFPATCH], 1, [Define if we have HDiffPatch])
   OSTREE_FEATURES="$OSTREE_FEATURES hdiffpatch"
+  dnl For static linking of libostree, which then contains C++
+  LIBS_PRIVATE="${LIBS_PRIVATE:+$LIBS_PRIVATE }${HDIFFPATCH_CXX_LIBS}"
 ])
 AM_CONDITIONAL([USE_HDIFFPATCH], [test x$with_hdiffpatch = xyes])
 
