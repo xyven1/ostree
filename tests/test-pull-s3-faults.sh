@@ -29,7 +29,7 @@ if ! command -v python3 >/dev/null; then
     skip "python3 is required"
 fi
 
-echo '1..16'
+echo '1..17'
 
 cd ${test_tmpdir}
 . $(dirname $0)/libtest-s3.sh
@@ -256,3 +256,24 @@ if test ${rc} -ne 0; then
 fi
 assert_file_has_content repeat.log "no temporary files left open"
 echo "ok no range outlives a failed pull"
+
+# 17: pulls cancelled while all nine follow-up ranges of a 40 MiB object finish
+# together. A range that already completed must not be failed again when its
+# siblings are cancelled (GLib logs a critical; the helper makes it fatal).
+mkdir -p files17
+head -c 41943040 /dev/urandom > files17/big.bin
+ostree_repo_init root/bkt/repo17 --mode=archive
+${CMD_PREFIX} ostree --repo=root/bkt/repo17 commit -b main -s c --tree=dir=files17 >/dev/null
+${CMD_PREFIX} ostree --repo=root/bkt/repo17 summary -u
+set_mode childslow
+mkdir cancel17
+rc=0
+${test_builddir}/s3-pull-repeat ${test_tmpdir}/cancel17 \
+    "s3://bkt/repo17?endpoint=http://127.0.0.1:${port}&region=us-east-1" 5 500 \
+    > cancel.log 2>&1 || rc=$?
+if test ${rc} -ne 0; then
+    cat cancel.log
+    fatal "cancelled in-process pulls failed with status ${rc}"
+fi
+assert_file_has_content cancel.log "no temporary files left open"
+echo "ok cancelling a pull with ranges in flight"

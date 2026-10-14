@@ -18,10 +18,11 @@
 /* Helper for tests/test-pull-s3-faults.sh: run several pulls of "main" in one
  * process, as a long-lived library user would, iterating the main context
  * between them so anything a pull left running gets to finish. Checks that
- * every pull failed (the server is set up to make them fail) and that no
- * temporary file is still held open afterwards.
+ * every pull failed (the server is set up to make them fail, or each pull is
+ * cancelled after CANCEL_MS), that no temporary file is still held open
+ * afterwards, and that nothing logged a critical warning.
  *
- *   s3-pull-repeat WORKDIR URL COUNT
+ *   s3-pull-repeat WORKDIR URL COUNT [CANCEL_MS]
  */
 
 #include "config.h"
@@ -55,17 +56,28 @@ count_deleted_fds (void)
   return n;
 }
 
+static gboolean
+cancel_cb (gpointer user_data)
+{
+  g_cancellable_cancel (user_data);
+  return G_SOURCE_REMOVE;
+}
+
 int
 main (int argc, char **argv)
 {
-  if (argc != 4)
+  if (argc != 4 && argc != 5)
     {
-      g_printerr ("usage: %s WORKDIR URL COUNT\n", argv[0]);
+      g_printerr ("usage: %s WORKDIR URL COUNT [CANCEL_MS]\n", argv[0]);
       return 2;
     }
   const char *workdir = argv[1];
   const char *url = argv[2];
   const int count = atoi (argv[3]);
+  const int cancel_ms = argc == 5 ? atoi (argv[4]) : 0;
+
+  /* A failed precondition (g_return_if_fail and the like) is a test failure. */
+  g_log_set_always_fatal (G_LOG_LEVEL_CRITICAL);
 
   for (int i = 0; i < count; i++)
     {
@@ -88,8 +100,12 @@ main (int argc, char **argv)
       g_variant_builder_add (&pull_opts, "{sv}", "disable-static-deltas",
                              g_variant_new_boolean (TRUE));
       g_variant_builder_add (&pull_opts, "{sv}", "n-network-retries", g_variant_new_uint32 (0));
+      g_autoptr (GCancellable) cancellable = g_cancellable_new ();
+      if (cancel_ms > 0)
+        g_timeout_add_full (G_PRIORITY_DEFAULT, cancel_ms, cancel_cb, g_object_ref (cancellable),
+                            g_object_unref);
       if (ostree_repo_pull_with_options (repo, "origin", g_variant_builder_end (&pull_opts), NULL,
-                                         NULL, &error))
+                                         cancellable, &error))
         {
           g_printerr ("pull %d unexpectedly succeeded\n", i);
           return 1;

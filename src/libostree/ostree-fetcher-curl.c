@@ -155,6 +155,10 @@ struct FetcherRequest
   char error[CURL_ERROR_SIZE];
 
   OstreeFetcher *fetcher;
+  /* Returned and forgotten (request_finished). Not g_task_get_completed(),
+   * which stays FALSE until the callback has run, and that is deferred to an
+   * idle once the task's cancellable is cancelled. */
+  gboolean finished;
 
   /* s3:// state; all unused (and is_s3 always FALSE) without HAVE_AWS. */
   gboolean is_s3;                        /* current attempt targets an s3:// mirror */
@@ -406,10 +410,12 @@ request_task_new (OstreeFetcher *self, FetcherRequest *req, int priority, GCance
   return task;
 }
 
-/* Forget a completed request; with none left, let go of the main context. */
+/* Forget a request that has just been returned; with none left, let go of
+ * the main context. */
 static void
 request_finished (OstreeFetcher *self, GTask *task)
 {
+  ((FetcherRequest *)g_task_get_task_data (task))->finished = TRUE;
   g_hash_table_remove (self->outstanding_requests, task);
   if (g_hash_table_size (self->outstanding_requests) == 0)
     g_clear_pointer (&self->mainctx, g_main_context_unref);
@@ -435,9 +441,10 @@ fail_later_idle_cb (gpointer user_data)
 {
   FailLaterData *data = user_data;
   OstreeFetcher *self = g_task_get_source_object (data->task);
+  FetcherRequest *req = g_task_get_task_data (data->task);
 
-  /* A range may have been cancelled, and so completed, in the meantime. */
-  if (!g_task_get_completed (data->task))
+  /* A range may have been cancelled, and so returned, in the meantime. */
+  if (!req->finished)
     {
       g_task_return_error (data->task, g_steal_pointer (&data->error));
       request_finished (self, data->task);
@@ -834,7 +841,7 @@ s3_range_cancel_children (OstreeFetcher *self, FetcherRequest *preq)
     {
       GTask *ctask = tasks->pdata[i];
       FetcherRequest *creq = g_task_get_task_data (ctask);
-      if (g_task_get_completed (ctask))
+      if (creq->finished)
         continue;
       if (creq->easy != NULL)
         (void)curl_multi_remove_handle (self->multi, creq->easy);
@@ -866,7 +873,7 @@ s3_range_child_done (GObject *source, GAsyncResult *result, gpointer user_data)
   if (preq->s3_range_error != NULL)
     s3_range_cancel_children (self, preq);
   /* The parent may already have failed on its own and been returned. */
-  if (preq->s3_range_children == 0 && preq->s3_range_self_done && !g_task_get_completed (ptask))
+  if (preq->s3_range_children == 0 && preq->s3_range_self_done && !preq->finished)
     s3_range_finish_parent (self, ptask);
 }
 
@@ -881,7 +888,7 @@ s3_range_spawn_idle (gpointer user_data)
 
   g_clear_pointer (&preq->s3_range_spawn, g_source_unref);
   preq->s3_range_pending = FALSE;
-  if (g_task_get_completed (ptask))
+  if (preq->finished)
     return G_SOURCE_REMOVE;
 
   /* Children write into the parent's file, so it has to exist now. */

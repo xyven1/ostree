@@ -28,6 +28,7 @@
 #                and no Content-Range
 #   firstdrop    for objects over 4 MiB: send 1 MiB of the first range, then
 #                hang up; answer the other ranges only after 5 seconds
+#   childslow    answer ranged requests that do not start at 0 after 1 second
 #
 # Every request is appended to LOG as "<start>-<end|*> <if-match|-> <path>".
 
@@ -101,6 +102,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         if child and mode == "childshifted":
             start, end = start - 1, end - 1
+
+        if child and mode == "childslow":
+            time.sleep(1)
 
         if mode == "firstdrop" and ranged and size > 4194304:
             if child:
