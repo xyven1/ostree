@@ -472,7 +472,7 @@ serving a mirror of real refs, then confirmed against S3.
 | Change | Why |
 |---|---|
 | Default concurrent requests for `s3://`: 32 -> 128 | Each object costs a round trip; an 88k-object pull is latency-bound. 156 s at 32, 88 s at 64, 61 s at 128, flat at 256. |
-| Delta parts downloading at once for `s3://`: 2 -> 16 | With two connections at 1.5 MiB/s a 642 MiB delta used a seventh of the link. 136 s at 2, 51 s at 8, 45 s at 16. Applying parts is still gated by `_OSTREE_MAX_OUTSTANDING_WRITE_REQUESTS`, so memory use while applying is unchanged; up to 16 downloaded parts can wait on disk. |
+| Delta parts downloading at once for `s3://`: 2 -> 16 | With two connections at 1.5 MiB/s a 642 MiB delta used a seventh of the link. 136 s at 2, 51 s at 8, 45 s at 16. At most two parts are decompressed and applied at a time (see "Repo safety"); downloaded parts wait on disk, and downloading plus waiting parts never exceed 16. |
 | Objects over 4 MiB are fetched as parallel 4 MiB ranges | Without it the end of a pull waits on its largest object arriving alone on one slow connection. 32 s -> 22 s for a 434 MiB pull whose largest object is 26 MiB; the link floor is 20 s. |
 
 Ranged fetching, in detail:
@@ -510,3 +510,53 @@ Ranged fetching, in detail:
 - SSO token refresh (5.3) is no longer hypothetical: the cached token
   expired during this work and pulls failed until credentials were supplied
   another way.
+
+### Repo safety (audited 2026-10-13)
+
+The question asked: can the performance work leave the repo on disk in a
+state stock ostree could not, or make a corrupt object more likely?
+
+**Where the fetcher's output is trusted.** On a normal pull every object is
+checked before it enters the repo: content is re-parsed and rewritten
+against its expected checksum, metadata checksums are compared, and delta
+parts are checked against the superblock. A fetcher bug there can fail a
+pull but cannot store a wrong object. The exception is `--http-trusted`
+mirroring into an archive repo, which links the fetched file into
+`objects/` unverified. Stock ostree trusts one HTTP response there; ranged
+fetching assembles the file from several, so it must be no weaker:
+
+- each follow-up range must be a 206 of exactly the requested length;
+- follow-up ranges are started only when the first response has a strong
+  ETag, and each carries it as `If-Match`; otherwise the object is fetched
+  whole, so two versions of an object can never be combined;
+- the assembled file's size is checked against the advertised total;
+- the parent request completes exactly once, and only after every range
+  has finished; any failure fails the whole object, and the tmpfile, never
+  handed over, is discarded.
+
+A server that sends wrong bytes with a correct length defeats
+`--http-trusted` with or without ranges, as before.
+
+**Partial commits.** The `.commitpartial` code is unchanged. It is written
+when a commit arrives before its contents and removed only when a pull
+completes successfully, which relies on each fetch completing exactly once
+and succeeding only with complete bytes. `tests/test-pull-s3-faults.sh`
+checks, for failed, truncated, ignored and corrupt ranges and for an
+object changing mid-download, that the pull fails, no partial object is
+left, the commit stays marked partial, `fsck` passes, and the next pull
+recovers and clears the marker. It also covers trusted mirroring.
+
+**A regression found and fixed.** Allowing 16 delta parts to download at
+once also let up to 16 be decompressed in memory and applied at once,
+because each part was applied as soon as it arrived: a 642 MiB delta
+peaked at 545 MiB instead of 90-130 MiB. Downloaded parts now queue on
+disk and at most two are applied at a time, the bound the old download
+limit gave. Peak memory measured against the simulator, old build versus
+new: delta 92 -> 151 MiB, software ref 33 -> 38 MiB, sysroot 82 -> 63 MiB.
+
+**Disk use while pulling.** Higher concurrency means more temporary files
+at once: up to 128 objects downloading and up to 16 delta parts downloaded
+or waiting. These are anonymous tmpfiles that vanish on failure or crash,
+but `min-free-space` is enforced when objects are written, not while they
+download, so a nearly full disk can run out mid-pull sooner than before.
+The pull fails cleanly when it does.
