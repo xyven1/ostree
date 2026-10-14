@@ -23,9 +23,6 @@
 #include "ostree-cmd-private.h"
 #include "ostree-core-private.h"
 #include "ostree-lzma-decompressor.h"
-#ifdef HAVE_ZSTD
-#include "ostree-zstd-decompressor.h"
-#endif
 #include "ostree-repo-private.h"
 #include "ostree-repo-static-delta-private.h"
 #include "otutil.h"
@@ -816,23 +813,6 @@ _ostree_static_delta_part_open (GInputStream *part_in, GBytes *inline_part_bytes
         ret_part = g_variant_new_from_bytes (G_VARIANT_TYPE ("ay"), content_bytes, TRUE);
       }
       break;
-    case OSTREE_STATIC_DELTA_COMPRESSION_ZSTD:
-      {
-#ifdef HAVE_ZSTD
-        g_autoptr (GConverter) decomp = (GConverter *)_ostree_zstd_decompressor_new ();
-        g_autoptr (GInputStream) convin = g_converter_input_stream_new (source_in, decomp);
-        g_autoptr (GBytes) buf = ot_map_anonymous_tmpfile_from_content (convin, cancellable, error);
-        if (!buf)
-          return FALSE;
-
-        ret_part = g_variant_new_from_bytes (
-            G_VARIANT_TYPE (OSTREE_STATIC_DELTA_PART_PAYLOAD_FORMAT_V0), buf, FALSE);
-#else
-        return glnx_throw (error, "Static delta part is zstd-compressed, but this version of "
-                                  "ostree was built without zstd support");
-#endif
-      }
-      break;
     default:
       return glnx_throw (error, "Invalid compression type '%u'", comptype);
     }
@@ -917,8 +897,8 @@ show_one_part (OstreeRepo *self, gboolean swap_endian, const char *from, const c
     {
       const guint *n_ops = stats.n_ops_executed;
       g_print ("PartPayloadOps%u: openspliceclose=%u open=%u write=%u setread=%u "
-               "unsetread=%u close=%u bspatch=%u hpatch=%u\n",
-               i, n_ops[0], n_ops[1], n_ops[2], n_ops[3], n_ops[4], n_ops[5], n_ops[6], n_ops[7]);
+               "unsetread=%u close=%u bspatch=%u\n",
+               i, n_ops[0], n_ops[1], n_ops[2], n_ops[3], n_ops[4], n_ops[5], n_ops[6]);
     }
   }
 

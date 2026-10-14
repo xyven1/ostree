@@ -4,6 +4,26 @@ Status: implemented on branch `worktree-hdiff-delta`. Written after the fact fro
 measurement on real operating system repositories; it records what was built, why, and the decisions that are
 still open to being overruled.
 
+## Update, 2026-10-13: bulk deltas only
+
+Measurement settled the choice between the two designs below: bulk deltas were 2 to 10 times
+smaller and 10 to 50 times faster to generate than any variant of the classic scheme on updates.
+The drop-in (`--file-delta=hdiff`, `--compression=zstd`, the `H` opcode, zstd-compressed classic
+parts, parallel compression of classic parts) has therefore been removed, along with the zstd
+GConverters it used.  The classic delta code is upstream's again apart from two hooks for bulk
+deltas.  The removed code is on the branch `hdiff-delta-with-dropin`.
+
+What follows describes both designs as first built.  Where it disagrees with the list here, the
+list is current:
+
+- `--effort`, `--threads` and `--allow-private-sources` apply to `--bulk` only.
+- The effort ladder was re-measured: 0-7 are zstd levels 1, 3, 6, 8, 10, 12, 16 and 18 (from 3
+  with long-distance matching), 8 is xz 6 with a 32 MiB dictionary and 9 is xz 9 with a 128 MiB
+  dictionary as a single block.  The default is 4.  `docs/formats.md` has the table.
+- Files are routed to the precise differ by basename with runs of digits ignored.
+- The bulk part writer hashes through ostree's checksum wrapper, so a build with
+  `--with-crypto=openssl` speeds up generation as well as applying.
+
 ## Goal
 
 Static delta generation is too slow, and the deltas are larger than they need to be, for the one

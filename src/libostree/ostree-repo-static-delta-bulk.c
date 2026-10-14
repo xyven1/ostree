@@ -333,31 +333,42 @@ typedef struct
 {
   guint8 compression;
   int level;
-  gboolean extreme;
+  /* log2 of the zstd window (which from 25 also turns on long distance
+   * matching) or of the xz dictionary; 0 for the default of the level.
+   */
   guint window_log;
   /* xz only: one block, compressed on a single thread */
   gboolean single_block;
   /* Block size for the block-matching differ */
   gsize stream_block;
-  /* Block size of the precise differ's pre-match */
-  gsize mem_block;
 } EffortConfig;
 
 /* From "as fast as possible" (tight development loops) to "as small as
- * possible" (updates sent over expensive links).  Up to 4 the data is zstd
- * compressed, which also applies several times faster; from 5 it is xz.
+ * possible" (updates sent over expensive links).  Each step was chosen from
+ * measurements on operating system images to be both smaller and slower than
+ * the one before it; settings that another one beat on both counts (xz at
+ * low presets, zstd 13-15, zstd 19 and above) are absent.
+ *
+ * Up to 7 the data is zstd compressed.  Decompressing zstd costs the same at
+ * every level, so those efforts differ only in the time to generate.  8 and
+ * 9 use xz, which is smaller still but takes two to three times as long to
+ * apply.  The window is also the memory needed to decompress: at most
+ * 32 MiB up to effort 3, 128 MiB above.
+ *
+ * The block-matching differ's block size only matters when there is a lot
+ * of new content; large blocks are about 20% faster and 1% larger.
  */
 static const EffortConfig effort_table[OSTREE_STATIC_DELTA_BULK_EFFORT_MAX + 1] = {
-  /* 0 */ { OSTREE_STATIC_DELTA_COMPRESSION_ZSTD, 1, FALSE, 0, FALSE, 1024, 1024 },
-  /* 1 */ { OSTREE_STATIC_DELTA_COMPRESSION_ZSTD, 3, FALSE, 0, FALSE, 256, 1024 },
-  /* 2 */ { OSTREE_STATIC_DELTA_COMPRESSION_ZSTD, 6, FALSE, 0, FALSE, 64, 1024 },
-  /* 3 */ { OSTREE_STATIC_DELTA_COMPRESSION_ZSTD, 10, FALSE, 24, FALSE, 64, 1024 },
-  /* 4 */ { OSTREE_STATIC_DELTA_COMPRESSION_ZSTD, 12, FALSE, 25, FALSE, 64, 1024 },
-  /* 5 */ { OSTREE_STATIC_DELTA_COMPRESSION_XZ, 1, FALSE, 23, FALSE, 64, 1024 },
-  /* 6 */ { OSTREE_STATIC_DELTA_COMPRESSION_XZ, 6, FALSE, 23, FALSE, 64, 1024 },
-  /* 7 */ { OSTREE_STATIC_DELTA_COMPRESSION_XZ, 6, FALSE, 25, FALSE, 64, 1024 },
-  /* 8 */ { OSTREE_STATIC_DELTA_COMPRESSION_XZ, 9, FALSE, 26, FALSE, 64, 1024 },
-  /* 9 */ { OSTREE_STATIC_DELTA_COMPRESSION_XZ, 9, TRUE, 26, TRUE, 64, 64 * 1024 },
+  /* 0 */ { OSTREE_STATIC_DELTA_COMPRESSION_ZSTD, 1, 0, FALSE, 1024 },
+  /* 1 */ { OSTREE_STATIC_DELTA_COMPRESSION_ZSTD, 3, 0, FALSE, 256 },
+  /* 2 */ { OSTREE_STATIC_DELTA_COMPRESSION_ZSTD, 6, 0, FALSE, 64 },
+  /* 3 */ { OSTREE_STATIC_DELTA_COMPRESSION_ZSTD, 8, 25, FALSE, 64 },
+  /* 4 */ { OSTREE_STATIC_DELTA_COMPRESSION_ZSTD, 10, 27, FALSE, 64 },
+  /* 5 */ { OSTREE_STATIC_DELTA_COMPRESSION_ZSTD, 12, 27, FALSE, 64 },
+  /* 6 */ { OSTREE_STATIC_DELTA_COMPRESSION_ZSTD, 16, 27, FALSE, 64 },
+  /* 7 */ { OSTREE_STATIC_DELTA_COMPRESSION_ZSTD, 18, 27, FALSE, 64 },
+  /* 8 */ { OSTREE_STATIC_DELTA_COMPRESSION_XZ, 6, 25, FALSE, 64 },
+  /* 9 */ { OSTREE_STATIC_DELTA_COMPRESSION_XZ, 9, 27, TRUE, 64 },
 };
 
 typedef struct
@@ -589,7 +600,7 @@ variant_table_intern (VariantTable *self, GVariant *value)
 typedef struct
 {
   int fd;
-  GChecksum *checksum;
+  OtChecksum *checksum;
   guint64 size;
 } PartWriter;
 
@@ -599,7 +610,7 @@ part_writer_write (gpointer user_data, const guint8 *buf, gsize len, GError **er
   PartWriter *self = user_data;
   if (glnx_loop_write (self->fd, buf, len) < 0)
     return glnx_throw_errno_prefix (error, "Writing delta part");
-  g_checksum_update (self->checksum, buf, len);
+  ot_checksum_update (self->checksum, buf, len);
   self->size += len;
   return TRUE;
 }
@@ -1022,7 +1033,6 @@ generator_emit_part (BulkGenerator *self, const char *name, guint part_index, GA
       if (precise && old_concat->size + new_concat->size <= MAX_MEM_DIFF_BYTES)
         {
           OtHdiffMemOptions opts = OT_HDIFF_MEM_OPTIONS_DEFAULT;
-          opts.fast_match_block = self->effort->mem_block;
           opts.threads = MIN (self->threads, 4);
           ok = _ostree_hdiff_create_block (&old_in, &new_in, &opts, &mem_diff, error);
           if (ok)
@@ -1056,7 +1066,6 @@ generator_emit_part (BulkGenerator *self, const char *name, guint part_index, GA
   };
   copts.type = self->effort->compression;
   copts.level = self->effort->level;
-  copts.extreme = self->effort->extreme;
   copts.window_log = self->effort->window_log;
   copts.threads = self->effort->single_block ? 1 : self->threads;
   if (data_size <= SMALL_DIFF_BYTES)
@@ -1118,8 +1127,11 @@ generator_emit_part (BulkGenerator *self, const char *name, guint part_index, GA
   if (!glnx_open_tmpfile_linkable_at (self->parts_dfd, ".", O_RDWR | O_CLOEXEC, &part->tmpf, error))
     return FALSE;
 
-  g_autoptr (GChecksum) checksum = g_checksum_new (G_CHECKSUM_SHA256);
-  PartWriter writer = { part->tmpf.fd, checksum, 0 };
+  g_auto (OtChecksum) checksum = {
+    0,
+  };
+  ot_checksum_init (&checksum);
+  PartWriter writer = { part->tmpf.fd, &checksum, 0 };
   {
     /* The header is mostly small integers; compress it with the codec of
      * the effort, at a strong setting since it is small.
@@ -1202,8 +1214,7 @@ generator_emit_part (BulkGenerator *self, const char *name, guint part_index, GA
   part->uncompressed_size = new_concat->size;
 
   guint8 digest[OSTREE_SHA256_DIGEST_LEN];
-  gsize digest_len = sizeof (digest);
-  g_checksum_get_digest (checksum, digest, &digest_len);
+  ot_checksum_get_digest (&checksum, digest, sizeof (digest));
   const gboolean swap = self->options->swap_endian;
   part->header = g_variant_ref_sink (g_variant_new (
       "(u@ay@t@t@ay)",
@@ -1358,7 +1369,7 @@ _ostree_static_delta_bulk_generate (OstreeRepo *repo, const char *from, const ch
 #endif
 #ifndef HAVE_ZSTD
   if (gen.effort->compression == OSTREE_STATIC_DELTA_COMPRESSION_ZSTD)
-    return glnx_throw (error, "Effort levels below 5 need zstd, which this version of ostree "
+    return glnx_throw (error, "Effort levels below 8 need zstd, which this version of ostree "
                               "was built without");
 #endif
 

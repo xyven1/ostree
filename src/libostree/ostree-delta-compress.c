@@ -66,8 +66,7 @@ compress_xz (const OtDeltaCompressOptions *options, OtDeltaReadFunc read, gpoint
 {
   lzma_stream strm = LZMA_STREAM_INIT;
   lzma_options_lzma lzma_opts;
-  const uint32_t preset
-      = (uint32_t)CLAMP (options->level, 0, 9) | (options->extreme ? LZMA_PRESET_EXTREME : 0);
+  const uint32_t preset = (uint32_t)CLAMP (options->level, 0, 9);
   if (lzma_lzma_preset (&lzma_opts, preset))
     return glnx_throw (error, "Invalid xz preset %d", options->level);
   if (options->window_log > 0)

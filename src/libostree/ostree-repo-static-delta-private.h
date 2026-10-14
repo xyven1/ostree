@@ -136,19 +136,16 @@ typedef enum
   OSTREE_STATIC_DELTA_OP_SET_READ_SOURCE = 'r',
   OSTREE_STATIC_DELTA_OP_UNSET_READ_SOURCE = 'R',
   OSTREE_STATIC_DELTA_OP_CLOSE = 'c',
-  OSTREE_STATIC_DELTA_OP_BSPATCH = 'B',
-  /* Like BSPATCH, but the payload is an uncompressed HDiffPatch
-   * single-stream diff.  Only emitted when explicitly requested.
-   */
-  OSTREE_STATIC_DELTA_OP_HPATCH = 'H'
+  OSTREE_STATIC_DELTA_OP_BSPATCH = 'B'
 } OstreeStaticDeltaOpCode;
-#define OSTREE_STATIC_DELTA_N_OPS 8
+#define OSTREE_STATIC_DELTA_N_OPS 7
 
-/* Values of the leading compression byte of a delta part */
+/* Values of the leading compression byte of a delta part.  Classic parts
+ * are uncompressed or xz; zstd is only used inside bulk parts.
+ */
 #define OSTREE_STATIC_DELTA_COMPRESSION_NONE 0
 #define OSTREE_STATIC_DELTA_COMPRESSION_XZ 'x'
 #define OSTREE_STATIC_DELTA_COMPRESSION_ZSTD 'z'
-#define OSTREE_STATIC_DELTA_ZSTD_DEFAULT_LEVEL 10
 
 /**
  * Bulk delta parts
@@ -184,7 +181,7 @@ typedef enum
 #define OSTREE_STATIC_DELTA_BULK_KIND_HDIFF 1
 
 #define OSTREE_STATIC_DELTA_BULK_EFFORT_MAX 9
-#define OSTREE_STATIC_DELTA_BULK_EFFORT_DEFAULT 5
+#define OSTREE_STATIC_DELTA_BULK_EFFORT_DEFAULT 4
 
 gboolean _ostree_static_delta_part_open (GInputStream *part_in, GBytes *inline_part_bytes,
                                          OstreeStaticDeltaOpenFlags flags,

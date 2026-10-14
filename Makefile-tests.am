@@ -424,14 +424,6 @@ tests_test_lzma_SOURCES = src/libostree/ostree-lzma-common.c src/libostree/ostre
 tests_test_lzma_CFLAGS = $(TESTS_CFLAGS) $(OT_DEP_LZMA_CFLAGS)
 tests_test_lzma_LDADD = $(TESTS_LDADD) $(OT_DEP_LZMA_LIBS)
 
-if USE_ZSTD
-_installed_or_uninstalled_test_programs += tests/test-zstd
-tests_test_zstd_SOURCES = src/libostree/ostree-zstd-compressor.c \
-	src/libostree/ostree-zstd-decompressor.c tests/test-zstd.c
-tests_test_zstd_CFLAGS = $(TESTS_CFLAGS) $(OT_DEP_ZSTD_CFLAGS)
-tests_test_zstd_LDADD = $(TESTS_LDADD) $(OT_DEP_ZSTD_LIBS)
-endif
-
 if USE_HDIFFPATCH
 _installed_or_uninstalled_test_programs += tests/test-hdiff
 tests_test_hdiff_SOURCES = tests/test-hdiff.c

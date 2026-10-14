@@ -202,13 +202,9 @@ _ostree_hdiff_create_block (const OtHdiffInput *old_in, const OtHdiffInput *new_
       /* Our inputs are not safe for concurrent use; HDiffPatch then locks */
       const hdiff_TMTSets_s mtsets = { threads, threads, false, false };
       const size_t block = MAX (options->fast_match_block, kMatchBlockSize_min);
-      if (options->legacy_format)
-        create_compressed_diff_block (&new_stream, &old_stream, &out_stream, NULL, block,
-                                      options->match_score, options->big_cache, &mtsets);
-      else
-        create_single_compressed_diff_block (&new_stream, &old_stream, &out_stream, NULL,
-                                             OT_HDIFF_STEP_MEM, block, options->match_score,
-                                             options->big_cache, &mtsets);
+      create_single_compressed_diff_block (&new_stream, &old_stream, &out_stream, NULL,
+                                           OT_HDIFF_STEP_MEM, block, options->match_score,
+                                           options->big_cache, &mtsets);
       *out_diff = g_bytes_new (diff.data (), diff.size ());
     }
   catch (const std::exception &e)
@@ -217,37 +213,6 @@ _ostree_hdiff_create_block (const OtHdiffInput *old_in, const OtHdiffInput *new_
       return FALSE;
     }
   return TRUE;
-}
-
-namespace
-{
-struct MemInput
-{
-  const guint8 *data;
-};
-
-gboolean
-mem_input_read (gpointer user_data, guint64 pos, guint8 *buf, gsize len)
-{
-  memcpy (buf, static_cast<MemInput *> (user_data)->data + pos, len);
-  return TRUE;
-}
-} /* namespace */
-
-/* Note HDiffPatch's own in-memory entry point temporarily rewrites its input
- * buffers in place; ours are frequently read-only mappings of repository
- * objects, so go through the input-based one, which copies what it needs.
- */
-gboolean
-_ostree_hdiff_create_mem (const guint8 *old_data, gsize old_len, const guint8 *new_data,
-                          gsize new_len, const OtHdiffMemOptions *options, GBytes **out_diff,
-                          GError **error)
-{
-  MemInput old_mem = { old_data };
-  MemInput new_mem = { new_data };
-  const OtHdiffInput old_in = { old_len, mem_input_read, &old_mem };
-  const OtHdiffInput new_in = { new_len, mem_input_read, &new_mem };
-  return _ostree_hdiff_create_block (&old_in, &new_in, options, out_diff, error);
 }
 
 gboolean
@@ -288,35 +253,6 @@ _ostree_hdiff_create_stream (const OtHdiffInput *old_in, const OtHdiffInput *new
 
   if (out_diff_size)
     *out_diff_size = out.size;
-  return TRUE;
-}
-
-gboolean
-_ostree_hdiff_patch_mem (const guint8 *old_data, gsize old_len, const guint8 *diff, gsize diff_len,
-                         guint8 *out_new, gsize new_len, GError **error)
-{
-  /* The older format; see OtHdiffMemOptions.legacy_format */
-  if (diff_len >= 7 && memcmp (diff, "HDIFF13", 7) == 0)
-    {
-      hpatch_compressedDiffInfo info;
-      if (!getCompressedDiffInfo_mem (&info, diff, diff + diff_len) || info.newDataSize != new_len
-          || info.oldDataSize != old_len || info.compressedCount != 0
-          || !patch_decompress_mem (out_new, out_new + new_len, old_data, old_data + old_len, diff,
-                                    diff + diff_len, NULL))
-        {
-          g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA, "hdiff patch failed");
-          return FALSE;
-        }
-      return TRUE;
-    }
-
-  PatchListener listener;
-  listener_init (&listener, new_len, old_len);
-  hpatch_BOOL ok = patch_single_stream_mem (&listener.base, out_new, out_new + new_len, old_data,
-                                            old_data + old_len, diff, diff + diff_len, NULL, 1);
-  g_free (listener.cache);
-  if (!ok)
-    return throw_patch_failed (&listener, error);
   return TRUE;
 }
 

@@ -78,6 +78,31 @@ bytearray_write (gpointer user_data, const guint8 *buf, gsize len)
   return TRUE;
 }
 
+/* Diff two buffers with the precise differ */
+static gboolean
+create_mem (const guint8 *old, gsize old_len, const guint8 *new, gsize new_len,
+            const OtHdiffMemOptions *opts, GBytes **out_diff, GError **error)
+{
+  MemInput old_mem = { old, old_len, 0, FALSE };
+  MemInput new_mem = { new, new_len, 0, FALSE };
+  OtHdiffInput old_in = { old_len, mem_read, &old_mem };
+  OtHdiffInput new_in = { new_len, mem_read, &new_mem };
+  return _ostree_hdiff_create_block (&old_in, &new_in, opts, out_diff, error);
+}
+
+/* Patch, checking that the diff is read strictly sequentially */
+static gboolean
+patch_mem (const guint8 *old, gsize old_len, const guint8 *diff, gsize diff_len, GByteArray *out,
+           gsize new_len, GError **error)
+{
+  MemInput old_mem = { old, old_len, 0, FALSE };
+  MemInput diff_mem = { diff, diff_len, 0, TRUE };
+  OtHdiffInput old_in = { old_len, mem_read, &old_mem };
+  OtHdiffInput diff_in = { diff_len, mem_read, &diff_mem };
+  g_byte_array_set_size (out, 0);
+  return _ostree_hdiff_patch_stream (&old_in, &diff_in, new_len, bytearray_write, out, error);
+}
+
 static void
 test_mem_roundtrip (void)
 {
@@ -92,28 +117,16 @@ test_mem_roundtrip (void)
       if (variant == 1)
         opts.fast_match_block = 64 * 1024;
       g_autoptr (GBytes) diff = NULL;
-      _ostree_hdiff_create_mem (old, OLD_SIZE, new, NEW_SIZE, &opts, &diff, &error);
+      create_mem (old, OLD_SIZE, new, NEW_SIZE, &opts, &diff, &error);
       g_assert_no_error (error);
       /* Nearly everything is shared with the old data */
       g_assert_cmpuint (g_bytes_get_size (diff), <, 8192);
 
-      g_autofree guint8 *out = g_malloc (NEW_SIZE);
-      _ostree_hdiff_patch_mem (old, OLD_SIZE, g_bytes_get_data (diff, NULL),
-                               g_bytes_get_size (diff), out, NEW_SIZE, &error);
+      g_autoptr (GByteArray) out = g_byte_array_new ();
+      patch_mem (old, OLD_SIZE, g_bytes_get_data (diff, NULL), g_bytes_get_size (diff), out,
+                 NEW_SIZE, &error);
       g_assert_no_error (error);
-      g_assert_cmpmem (out, NEW_SIZE, new, NEW_SIZE);
-
-      /* The same diff applies through the streaming interface, reading the
-       * diff strictly sequentially.
-       */
-      MemInput old_mem = { old, OLD_SIZE, 0, FALSE };
-      MemInput diff_mem = { g_bytes_get_data (diff, NULL), g_bytes_get_size (diff), 0, TRUE };
-      OtHdiffInput old_in = { OLD_SIZE, mem_read, &old_mem };
-      OtHdiffInput diff_in = { g_bytes_get_size (diff), mem_read, &diff_mem };
-      g_autoptr (GByteArray) streamed = g_byte_array_new ();
-      _ostree_hdiff_patch_stream (&old_in, &diff_in, NEW_SIZE, bytearray_write, streamed, &error);
-      g_assert_no_error (error);
-      g_assert_cmpmem (streamed->data, streamed->len, new, NEW_SIZE);
+      g_assert_cmpmem (out->data, out->len, new, NEW_SIZE);
     }
 }
 
@@ -145,11 +158,10 @@ test_stream_roundtrip (void)
   g_assert_no_error (error);
   g_assert_cmpuint (g_bytes_get_size (diff), ==, diff_size);
 
-  g_autofree guint8 *out = g_malloc (NEW_SIZE);
-  _ostree_hdiff_patch_mem (old, OLD_SIZE, g_bytes_get_data (diff, NULL), diff_size, out, NEW_SIZE,
-                           &error);
+  g_autoptr (GByteArray) out = g_byte_array_new ();
+  patch_mem (old, OLD_SIZE, g_bytes_get_data (diff, NULL), diff_size, out, NEW_SIZE, &error);
   g_assert_no_error (error);
-  g_assert_cmpmem (out, NEW_SIZE, new, NEW_SIZE);
+  g_assert_cmpmem (out->data, out->len, new, NEW_SIZE);
 }
 
 static void
@@ -159,13 +171,13 @@ test_empty_old (void)
   g_autofree guint8 *new = g_malloc (4096);
   fill (new, 4096, 3);
   g_autoptr (GBytes) diff = NULL;
-  _ostree_hdiff_create_mem ((const guint8 *)"", 0, new, 4096, NULL, &diff, &error);
+  create_mem ((const guint8 *)"", 0, new, 4096, NULL, &diff, &error);
   g_assert_no_error (error);
-  g_autofree guint8 *out = g_malloc (4096);
-  _ostree_hdiff_patch_mem ((const guint8 *)"", 0, g_bytes_get_data (diff, NULL),
-                           g_bytes_get_size (diff), out, 4096, &error);
+  g_autoptr (GByteArray) out = g_byte_array_new ();
+  patch_mem ((const guint8 *)"", 0, g_bytes_get_data (diff, NULL), g_bytes_get_size (diff), out,
+             4096, &error);
   g_assert_no_error (error);
-  g_assert_cmpmem (out, 4096, new, 4096);
+  g_assert_cmpmem (out->data, out->len, new, 4096);
 }
 
 static void
@@ -176,32 +188,29 @@ test_bad_input (void)
   g_autofree guint8 *new = NULL;
   make_pair (&old, &new);
   g_autoptr (GBytes) diff = NULL;
-  _ostree_hdiff_create_mem (old, OLD_SIZE, new, NEW_SIZE, NULL, &diff, &error);
+  create_mem (old, OLD_SIZE, new, NEW_SIZE, NULL, &diff, &error);
   g_assert_no_error (error);
   gsize diff_len = g_bytes_get_size (diff);
   const guint8 *diff_data = g_bytes_get_data (diff, NULL);
-  g_autofree guint8 *out = g_malloc (NEW_SIZE);
+  g_autoptr (GByteArray) out = g_byte_array_new ();
 
   /* Wrong target size */
-  g_assert_false (
-      _ostree_hdiff_patch_mem (old, OLD_SIZE, diff_data, diff_len, out, NEW_SIZE - 1, &error));
+  g_assert_false (patch_mem (old, OLD_SIZE, diff_data, diff_len, out, NEW_SIZE - 1, &error));
   g_assert_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA);
   g_clear_error (&error);
 
   /* Wrong source size */
-  g_assert_false (
-      _ostree_hdiff_patch_mem (old, OLD_SIZE - 1, diff_data, diff_len, out, NEW_SIZE, &error));
+  g_assert_false (patch_mem (old, OLD_SIZE - 1, diff_data, diff_len, out, NEW_SIZE, &error));
   g_assert_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA);
   g_clear_error (&error);
 
   /* Truncated diff */
-  g_assert_false (
-      _ostree_hdiff_patch_mem (old, OLD_SIZE, diff_data, diff_len / 2, out, NEW_SIZE, &error));
+  g_assert_false (patch_mem (old, OLD_SIZE, diff_data, diff_len / 2, out, NEW_SIZE, &error));
   g_assert_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA);
   g_clear_error (&error);
 
   /* Not a diff at all */
-  g_assert_false (_ostree_hdiff_patch_mem (old, OLD_SIZE, old, 4096, out, NEW_SIZE, &error));
+  g_assert_false (patch_mem (old, OLD_SIZE, old, 4096, out, NEW_SIZE, &error));
   g_assert_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA);
   g_clear_error (&error);
 }

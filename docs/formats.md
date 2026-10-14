@@ -195,29 +195,6 @@ hint for this - for example, files within a same package).
 A generated bsdiff is included in the payload blob, and applying it is
 an instruction.
 
-### hdiff and zstd
-
-Two optional variations of the above exist, selected when generating
-a delta.  Both need a client built with the corresponding support
-(`ostree --version` lists `hdiffpatch` and `zstd`); older clients fail
-cleanly on the unknown instruction or compression type.
-
- - `--file-delta=hdiff` uses
-   [HDiffPatch](https://github.com/sisong/HDiffPatch) instead of bsdiff
-   for the per-file deltas.  bsdiff typically accounts for nearly all
-   of the time taken to generate a delta for an operating system
-   update; hdiff is around a hundred times faster on the same files,
-   produces slightly smaller parts, and is not subject to
-   `--max-bsdiff-size`.
- - `--compression=zstd[:LEVEL]` compresses delta parts with zstd
-   instead of xz (`--compression=xz:LEVEL` selects an xz preset).  Generating a `from NULL` delta is almost entirely
-   compression; zstd makes that an order of magnitude faster at the
-   cost of deltas around a third larger.
-
-Independently of these, `--threads=N` compresses several delta parts
-at once.  The delta produced is identical; only the time and memory
-needed to generate it change.
-
 ## Bulk deltas
 
 `ostree static-delta generate --bulk` produces a different kind of
@@ -263,12 +240,44 @@ simply holds the compressed stream.
 
 `--effort=N` chooses the tradeoff between generation time and size,
 from 0 (as fast as possible, for development loops) to 9 (as small as
-possible, for expensive links); the default is 5.  Efforts 0-4
-compress with zstd, which is also several times faster to apply;
-efforts 5-9 compress with xz.  Compression is multi-threaded; use
-`--threads` to limit it.  For an ordinary update the effort barely
-matters, since the diff is tiny either way; it matters when there is
-a lot of new content.
+possible, for expensive links); the default is 4.  For an ordinary
+update the effort barely matters: a diff of a few megabytes or less is
+always compressed at the strongest setting, since that takes no time.
+It matters when there is a lot of new content.
+
+| Effort | Compression | Use |
+|---|---|---|
+| 0 | zstd 1 | Fastest.  Local development loops, where the delta is not sent anywhere slow. |
+| 1 | zstd 3 | About one eighth smaller than 0 for little more time. |
+| 2 | zstd 6 | |
+| 3 | zstd 8, long-distance matching, 32 MiB window | A quarter smaller than 0 at two to three times its time. |
+| 4 | zstd 10, long-distance matching, 128 MiB window | The default: most of the size zstd can give before the time climbs steeply. |
+| 5 | zstd 12, same window | |
+| 6 | zstd 16, same window | Several times slower to generate than 5. |
+| 7 | zstd 18, same window | The smallest delta that still applies at full speed. |
+| 8 | xz preset 6, 32 MiB dictionary | Smaller than any zstd effort, but two to three times slower to apply. |
+| 9 | xz preset 9, 128 MiB dictionary, one block | Smallest.  Compressed on a single thread: minutes per gigabyte. |
+
+As an indication, a 320 MB operating system tree as a `from NULL`
+delta, generated with 8 threads:
+
+| Effort | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| Size (MB) | 100 | 88 | 82 | 74 | 71 | 70 | 67 | 61 | 57 | 53 |
+| Generate (s) | 0.4 | 0.4 | 0.7 | 1.1 | 1.8 | 2.7 | 9 | 16 | 40 | 125 |
+| Apply (s) | 1.0 | 1.0 | 1.0 | 1.0 | 1.0 | 1.0 | 1.0 | 1.1 | 2.9 | 2.9 |
+
+Decompressing zstd costs the same at every level, so efforts 0-7
+differ only in the time to generate; choose among them by how long
+generation may take.  Choose 8 or 9 only when the size of the delta
+matters more than the time to apply it.  The client needs memory for
+the compression window while applying: up to 32 MiB for efforts 0-3
+and 128 MiB above.
+
+Compression is multi-threaded except at effort 9; use `--threads` to
+limit it.  The settings that are absent (xz at low presets, zstd
+13-15, zstd 19 and above) were measured and found to be both larger
+and slower than one of those listed.
 
 When a bulk part is applied, the old stream is read by random access
 directly from the repository's objects, the diff is decompressed as it
@@ -280,8 +289,9 @@ Bulk deltas use the same superblock as other deltas, so signing,
 inline parts, `ostree pull` and `ostree static-delta apply-offline`
 all work unchanged.  Their limitations:
 
- - They need a client built with hdiffpatch support (and zstd support,
-   for efforts below 5).
+ - They need a client built with hdiffpatch support, and with zstd
+   support for efforts below 8 (`ostree --version` lists `hdiffpatch`
+   and `zstd`).  Other clients fail cleanly on the unknown part type.
  - They can only be applied to `bare`, `bare-user` and
    `bare-user-only` repositories, because the old stream is read
    directly from the stored objects.
@@ -291,13 +301,13 @@ all work unchanged.  Their limitations:
 
 ### Private delta sources
 
-No kind of delta, by default, is computed against a file of the origin
-commit that is not world-readable; the new version of such a file is
-included whole.  This guarantees that the client can read every object
+Like other deltas, a bulk delta is by default not computed against a
+file of the origin commit that is not world-readable; the new version
+of such a file is included whole.  This guarantees that the client can read every object
 it needs to apply the delta, even an unprivileged user whose repository
 has a root-owned `bare` repository as its parent.
 
-`--allow-private-sources` lifts the restriction.  It is safe wherever
+`--allow-private-sources` lifts the restriction for bulk deltas.  It is safe wherever
 updates are applied by root, or to a `bare-user` repository without such
 a parent, and can make a small delta several times smaller: the files
 that change in every build of an operating system (package caches,

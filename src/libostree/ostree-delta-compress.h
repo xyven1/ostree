@@ -32,8 +32,6 @@ typedef struct
   guint8 type;
   /* zstd level, or xz preset (0-9) */
   int level;
-  /* xz only: use the "extreme" preset variant */
-  gboolean extreme;
   /* log2 of the zstd window, or of the xz dictionary size; 0 for the default
    * of the level.  This bounds the memory needed to decompress.
    */

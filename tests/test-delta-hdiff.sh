@@ -15,8 +15,7 @@
 # You should have received a copy of the GNU Lesser General Public
 # License along with this library. If not, see <https://www.gnu.org/licenses/>.
 
-# Static deltas using HDiffPatch: the hdiff per-file delta and zstd part
-# compression for the classic scheme, and bulk deltas.
+# Bulk static deltas (HDiffPatch over whole groups of objects).
 
 set -euo pipefail
 
@@ -26,7 +25,7 @@ skip_without_user_xattrs
 skip_without_ostree_feature hdiffpatch
 skip_without_ostree_feature zstd
 
-echo '1..17'
+echo '1..13'
 
 # Deterministic pseudo-random data: compressible, but not trivially so
 gen_data() {
@@ -97,7 +96,7 @@ apply_and_check() {
     assert_files_equal expected-ls.txt actual-ls.txt
 }
 
-mkdir -p deltas/hdiff-dir deltas/zstd-dir deltas/bulk-dir
+mkdir -p deltas/bulk-dir
 
 # The classic scheme, for size comparisons below
 ${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} \
@@ -105,45 +104,6 @@ ${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${
 apply_and_check deltas/classic
 classic_size=$(stat -c '%s' deltas/classic)
 echo "ok classic baseline"
-
-# hdiff as the per-file delta
-${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} \
-              --min-fallback-size=0 --filename=deltas/hdiff-dir/superblock --file-delta=hdiff \
-              2>&1 | tee out.txt
-${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} \
-              --min-fallback-size=0 --file-delta=hdiff
-${CMD_PREFIX} ostree --repo=repo static-delta show ${origrev}-${newrev} > show.txt
-assert_file_has_content show.txt 'hpatch=[1-9]'
-assert_file_has_content show.txt 'bspatch=0'
-apply_and_check deltas/hdiff-dir/superblock
-${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} \
-              --min-fallback-size=0 --inline --filename=deltas/hdiff-inline --file-delta=hdiff
-apply_and_check deltas/hdiff-inline
-if ${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} \
-                 --file-delta=nope --filename=deltas/bad 2>err.txt; then
-    assert_not_reached "invalid --file-delta unexpectedly succeeded"
-fi
-assert_file_has_content err.txt "Invalid 'file-delta'"
-echo "ok hdiff per-file delta"
-
-# zstd part compression, with and without hdiff
-${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} \
-              --min-fallback-size=0 --inline --filename=deltas/zstd --compression=zstd
-apply_and_check deltas/zstd
-${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} \
-              --min-fallback-size=0 --inline --filename=deltas/zstd-hdiff --compression=zstd:19 \
-              --file-delta=hdiff
-apply_and_check deltas/zstd-hdiff
-${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} \
-              --min-fallback-size=0 --filename=deltas/zstd-dir/superblock --compression=zstd:1
-apply_and_check deltas/zstd-dir/superblock
-for bad in lz4 zstd:abc zstd:99 xz:10 xz:abc; do
-    if ${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} \
-                     --compression=${bad} --filename=deltas/bad 2>err.txt; then
-        assert_not_reached "--compression=${bad} unexpectedly succeeded"
-    fi
-done
-echo "ok zstd part compression"
 
 # Bulk deltas at every effort, inline
 for effort in 0 1 2 3 4 5 6 7 8 9; do
@@ -153,20 +113,18 @@ for effort in 0 1 2 3 4 5 6 7 8 9; do
 done
 echo "ok bulk delta at every effort"
 
-# The whole point: far smaller than the classic scheme on an update.  Compare
-# like with like: by default neither diffs the non-world-readable file.
-for sources in "" "--allow-private-sources"; do
-    ${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} \
-                  --min-fallback-size=0 --inline --filename=deltas/size-classic ${sources}
-    ${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} \
-                  --inline --filename=deltas/size-bulk --bulk ${sources}
-    classic_size=$(stat -c '%s' deltas/size-classic)
-    bulk_size=$(stat -c '%s' deltas/size-bulk)
-    if test ${bulk_size} -ge ${classic_size}; then
-        assert_not_reached "bulk delta (${bulk_size}) not smaller than classic (${classic_size}) with '${sources}'"
-    fi
-done
+# The whole point: far smaller than the classic scheme on an update, even
+# though by default neither diffs the non-world-readable file.
+${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} \
+              --inline --filename=deltas/size-bulk --bulk
+bulk_size=$(stat -c '%s' deltas/size-bulk)
+if test ${bulk_size} -ge ${classic_size}; then
+    assert_not_reached "bulk delta (${bulk_size}) not smaller than classic (${classic_size})"
+fi
 # With everything diffable it is at least a third smaller on this tree
+${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} \
+              --inline --filename=deltas/size-bulk --bulk --allow-private-sources
+bulk_size=$(stat -c '%s' deltas/size-bulk)
 if test $((bulk_size * 3)) -gt $((classic_size * 2)); then
     assert_not_reached "bulk delta (${bulk_size}) not much smaller than classic (${classic_size})"
 fi
@@ -264,61 +222,20 @@ for effort in 0 5; do
 done
 echo "ok damaged bulk delta"
 
-# xz presets and the hdiff block size
-for level in 0 9; do
-    ${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} \
-                  --min-fallback-size=0 --inline --filename=deltas/xz-${level} --compression=xz:${level}
-    apply_and_check deltas/xz-${level}
-done
-${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} \
-              --min-fallback-size=0 --inline --filename=deltas/hdiff-64k --file-delta=hdiff:64k
-apply_and_check deltas/hdiff-64k
-for bad in hdiff:1 hdiff:abc bsdiff:64k hdiff:1g; do
-    if ${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} \
-                     --file-delta=${bad} --filename=deltas/bad 2>err.txt; then
-        assert_not_reached "--file-delta=${bad} unexpectedly succeeded"
-    fi
-done
-echo "ok xz presets and hdiff block size"
-
-# Compressing parts on several threads gives exactly the same parts
-for variant in "--compression=xz" "--compression=zstd --file-delta=hdiff"; do
-    for threads in 1 4; do
-        rm -rf deltas/mt-${threads} && mkdir deltas/mt-${threads}
-        ${CMD_PREFIX} ostree --repo=repo static-delta generate --empty --to=${newrev} \
-                      --min-fallback-size=0 --max-chunk-size=1 ${variant} --threads=${threads} \
-                      --filename=deltas/mt-${threads}/superblock
-    done
-    assert_has_file deltas/mt-1/0
-    assert_has_file deltas/mt-1/1
-    for part in deltas/mt-1/[0-9]*; do
-        cmp ${part} deltas/mt-4/$(basename ${part})
-    done
-    test $(ls deltas/mt-1 | wc -l) = $(ls deltas/mt-4 | wc -l)
-    apply_and_check deltas/mt-4/superblock empty
-done
-echo "ok parallel part compression"
-
 # Files that are not world readable (etc/secret here) are only used as delta
-# sources on request, for every kind of delta
-for variant in "--file-delta=hdiff" "--bulk"; do
-    ${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} \
-                  --min-fallback-size=0 --inline --filename=deltas/private-off ${variant}
-    ${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} \
-                  --min-fallback-size=0 --inline --filename=deltas/private-on ${variant} \
-                  --allow-private-sources
-    apply_and_check deltas/private-off
-    apply_and_check deltas/private-on
-    off_size=$(stat -c '%s' deltas/private-off)
-    on_size=$(stat -c '%s' deltas/private-on)
-    # The 40k secret file differs by one byte; shipping it whole costs kilobytes
-    if test $((on_size + 4096)) -gt ${off_size}; then
-        assert_not_reached "${variant}: private sources did not shrink the delta (${on_size} vs ${off_size})"
-    fi
-done
+# sources on request
 ${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} \
-              --min-fallback-size=0 --inline --filename=deltas/private-bsdiff --allow-private-sources
-apply_and_check deltas/private-bsdiff
+              --inline --filename=deltas/private-off --bulk
+${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} \
+              --inline --filename=deltas/private-on --bulk --allow-private-sources
+apply_and_check deltas/private-off
+apply_and_check deltas/private-on
+off_size=$(stat -c '%s' deltas/private-off)
+on_size=$(stat -c '%s' deltas/private-on)
+# The 40k secret file differs by one byte; shipping it whole costs kilobytes
+if test $((on_size + 4096)) -gt ${off_size}; then
+    assert_not_reached "private sources did not shrink the delta (${on_size} vs ${off_size})"
+fi
 echo "ok private delta sources"
 
 # Parts larger than a few megabytes are read, compressed and written by
@@ -382,4 +299,11 @@ if ${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to
     assert_not_reached "--effort without --bulk unexpectedly succeeded"
 fi
 assert_file_has_content err.txt "requires --bulk"
+for opt in --threads=2 --allow-private-sources; do
+    if ${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} \
+                     ${opt} --filename=deltas/bad 2>err.txt; then
+        assert_not_reached "${opt} without --bulk unexpectedly succeeded"
+    fi
+    assert_file_has_content err.txt "requires --bulk"
+done
 echo "ok option validation"
