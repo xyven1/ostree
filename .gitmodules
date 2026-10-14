@@ -4,3 +4,7 @@
 [submodule "bsdiff"]
 	path = bsdiff
 	url = https://github.com/mendsley/bsdiff
+[submodule "hdiffpatch"]
+	path = hdiffpatch
+	url = https://github.com/sisong/HDiffPatch
+	ignore = untracked
