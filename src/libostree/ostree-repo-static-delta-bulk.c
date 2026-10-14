@@ -544,18 +544,21 @@ path_basename (const char *path)
   return slash ? slash + 1 : path;
 }
 
-/* The name files are grouped by: the basename with every run of digits collapsed, so that
- * libfoo.so.1.2.3 and libfoo.so.1.3.0 count as the same file.  Owned by @chunk.
+/* A second name to pair files by when the basename itself finds nothing: the
+ * basename with every run of digits collapsed, so that libfoo.so.1.2.3 and
+ * libfoo.so.1.3.0 count as the same file.  It starts with a slash, which no
+ * basename contains, so both kinds of name can share a table.  Owned by
+ * @chunk.
  */
 static const char *
-route_name (GStringChunk *chunk, const char *path)
+fuzzy_name (GStringChunk *chunk, const char *path)
 {
-  g_autoptr (GString) s = g_string_new (NULL);
+  g_autoptr (GString) s = g_string_new ("/");
   for (const char *p = path_basename (path); *p; p++)
     {
       if (!g_ascii_isdigit (*p))
         g_string_append_c (s, *p);
-      else if (s->len == 0 || s->str[s->len - 1] != '0')
+      else if (s->str[s->len - 1] != '0')
         g_string_append_c (s, '0');
     }
   return g_string_chunk_insert_const (chunk, s->str);
@@ -1407,17 +1410,22 @@ _ostree_static_delta_bulk_generate (OstreeRepo *repo, const char *from, const ch
 
   g_autoptr (GStringChunk) names = g_string_chunk_new (4096);
 
-  /* Names (see route_name()) of regular files that are gone in the target */
+  /* Basenames, and fuzzy names, of regular files that are gone in the target */
   g_autoptr (GHashTable) gone_basenames = g_hash_table_new (g_str_hash, g_str_equal);
-  /* Names of the new regular files in each part */
+  /* The names by which new regular files were matched to gone ones */
   g_autoptr (GHashTable) mod_basenames = g_hash_table_new (g_str_hash, g_str_equal);
+  gboolean mod_has_fuzzy = FALSE;
+  /* Basenames of the other new regular files */
   g_autoptr (GHashTable) add_basenames = g_hash_table_new (g_str_hash, g_str_equal);
   GHashTableIter iter;
   gpointer key, value;
   g_hash_table_iter_init (&iter, from_contents.files);
   while (g_hash_table_iter_next (&iter, &key, &value))
     if (!g_hash_table_contains (to_contents.files, key))
-      g_hash_table_add (gone_basenames, (char *)route_name (names, value));
+      {
+        g_hash_table_add (gone_basenames, (char *)path_basename (value));
+        g_hash_table_add (gone_basenames, (char *)fuzzy_name (names, value));
+      }
 
   /* New metadata.  The commit object itself travels in the superblock. */
   struct
@@ -1467,12 +1475,31 @@ _ostree_static_delta_bulk_generate (OstreeRepo *repo, const char *from, const ch
       };
       if (!generator_load_new_file (&gen, key, value, &modes, &xattrs, &obj, cancellable, error))
         goto out;
-      const char *basename = route_name (names, value);
-      /* Symlinks are tiny; keep them with the metadata */
-      if (obj.mem != NULL || g_hash_table_contains (gone_basenames, basename))
+      /* A gone file of the same name is this file's previous version.
+       * Failing that, try the name without its numbers: the version may be
+       * part of it.
+       */
+      const char *basename = path_basename (value);
+      const char *match = NULL;
+      if (obj.mem == NULL)
         {
-          if (obj.mem == NULL)
-            g_hash_table_add (mod_basenames, (char *)basename);
+          if (g_hash_table_contains (gone_basenames, basename))
+            match = basename;
+          else
+            {
+              const char *fuzzy = fuzzy_name (names, value);
+              if (g_hash_table_contains (gone_basenames, fuzzy))
+                {
+                  match = fuzzy;
+                  mod_has_fuzzy = TRUE;
+                }
+            }
+        }
+      /* Symlinks are tiny; keep them with the metadata */
+      if (obj.mem != NULL || match != NULL)
+        {
+          if (match != NULL)
+            g_hash_table_add (mod_basenames, (char *)match);
           g_array_append_val (mod_new, obj);
         }
       else
@@ -1486,10 +1513,17 @@ _ostree_static_delta_bulk_generate (OstreeRepo *repo, const char *from, const ch
   g_hash_table_iter_init (&iter, from_contents.files);
   while (g_hash_table_iter_next (&iter, &key, &value))
     {
-      const char *basename = route_name (names, value);
+      const char *basename = path_basename (value);
       const gboolean gone = !g_hash_table_contains (to_contents.files, key);
+      gboolean in_mod = FALSE;
+      if (gone)
+        {
+          in_mod = g_hash_table_contains (mod_basenames, basename);
+          if (!in_mod && mod_has_fuzzy)
+            in_mod = g_hash_table_contains (mod_basenames, fuzzy_name (names, value));
+        }
       GArray *target = NULL;
-      if (gone && g_hash_table_contains (mod_basenames, basename))
+      if (in_mod)
         target = mod_old;
       else if (add_new->len > 0 && (gone || g_hash_table_contains (add_basenames, basename)))
         target = add_old;

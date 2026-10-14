@@ -20,7 +20,8 @@ list is current:
 - The effort ladder was re-measured: 0-7 are zstd levels 1, 3, 6, 8, 10, 12, 16 and 18 (from 3
   with long-distance matching), 8 is xz 6 with a 32 MiB dictionary and 9 is xz 9 with a 128 MiB
   dictionary as a single block.  The default is 4.  `docs/formats.md` has the table.
-- Files are routed to the precise differ by basename with runs of digits ignored.
+- Files are routed to the precise differ by basename; a new file that matches no gone file that
+  way is matched again with runs of digits ignored.
 - The bulk part writer hashes through ostree's checksum wrapper, so a build with
   `--with-crypto=openssl` speeds up generation as well as applying.
 

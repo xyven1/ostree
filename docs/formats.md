@@ -230,10 +230,11 @@ A bulk delta has at most two parts, generated concurrently:
    differ.  This is mostly content with nothing to diff against, so
    its cost is compression.
 
-Names are compared by basename with runs of digits treated as equal,
-so `libfoo.so.1.2.3` matches `libfoo.so.1.3.0`: a library whose
-version is part of its file name still gets the precise differ when
-it is upgraded.
+A name is a file's basename.  A new file with no gone file of the
+same basename is matched once more with runs of digits treated as
+equal, so that `libfoo.so.1.3.0` is paired with a gone
+`libfoo.so.1.2.3`: a library whose version is part of its file name
+still gets the precise differ when it is upgraded.
 
 For a `from NULL` delta there is nothing to diff, and a single part
 simply holds the compressed stream.
