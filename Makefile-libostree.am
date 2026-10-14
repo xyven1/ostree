@@ -213,6 +213,14 @@ libostree_1_la_CFLAGS += $(OT_DEP_ZSTD_CFLAGS)
 libostree_1_la_LIBADD += $(OT_DEP_ZSTD_LIBS)
 endif
 
+if USE_HDIFFPATCH
+# libostree-hdiff.la contains C++, so link its runtime too (see
+# HDIFFPATCH_CXX_LIBS in configure.ac).  Not by giving libostree a C++
+# source: automake would then always link it as C++, even when HDiffPatch
+# is not built and there is no C++ compiler.
+libostree_1_la_LIBADD += libostree-hdiff.la $(HDIFFPATCH_CXX_LIBS)
+endif
+
 if USE_AVAHI
 libostree_1_la_CFLAGS += $(OT_DEP_AVAHI_CFLAGS)
 libostree_1_la_LIBADD += $(OT_DEP_AVAHI_LIBS)
