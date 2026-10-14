@@ -145,6 +145,24 @@ ZLIB_DEPENDENCY=zlib
 PKG_CHECK_MODULES(OT_DEP_ZLIB, $ZLIB_DEPENDENCY)
 REQUIRES_PRIVATE="${REQUIRES_PRIVATE} ${ZLIB_DEPENDENCY}"
 
+dnl Optional: zstd compression for bulk static deltas
+ZSTD_DEPENDENCY="libzstd >= 1.4.0"
+AC_ARG_WITH([zstd],
+  [AS_HELP_STRING([--with-zstd], [Enable zstd compression of bulk static deltas @<:@default=auto@:>@])],
+  [], [with_zstd=auto])
+AS_IF([test x$with_zstd != xno], [
+  PKG_CHECK_MODULES([OT_DEP_ZSTD], [$ZSTD_DEPENDENCY], [have_zstd=yes], [have_zstd=no])
+  AS_IF([test x$have_zstd = xno && test x$with_zstd = xyes],
+    [AC_MSG_ERROR([--with-zstd was given, but $ZSTD_DEPENDENCY was not found])])
+  with_zstd=$have_zstd
+])
+AS_IF([test x$with_zstd = xyes], [
+  AC_DEFINE([HAVE_ZSTD], 1, [Define if we have libzstd])
+  REQUIRES_PRIVATE="${REQUIRES_PRIVATE} ${ZSTD_DEPENDENCY}"
+  OSTREE_FEATURES="$OSTREE_FEATURES zstd"
+])
+AM_CONDITIONAL([USE_ZSTD], [test x$with_zstd = xyes])
+
 dnl We're not actually linking to this, just using the header
 PKG_CHECK_MODULES(OT_DEP_E2P, e2p)
 
@@ -755,6 +773,7 @@ echo "
     libsodium (ed25519 signatures):               $with_ed25519_libsodium
     openssl (ed25519 and spki signatures):        $with_openssl
     libarchive (parse tar files directly):        $with_libarchive
+    zstd (bulk static delta compression):         $with_zstd
     static deltas:                                yes (always enabled now)
     O_TMPFILE:                                    $enable_otmpfile
     wrpseudo-compat:                              $enable_wrpseudo_compat
