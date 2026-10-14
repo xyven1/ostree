@@ -195,6 +195,159 @@ hint for this - for example, files within a same package).
 A generated bsdiff is included in the payload blob, and applying it is
 an instruction.
 
+## Bulk deltas
+
+`ostree static-delta generate --bulk` produces a different kind of
+delta part.  Instead of a blob plus instructions and a delta per file,
+all of the objects of a part are concatenated into one *stream*:
+directory metadata objects first, then file content, each ordered by
+path.  The part then carries either that stream, compressed, or a
+single HDiffPatch diff that produces it from an *old* stream: the
+concatenation of a list of objects the client already has.
+
+Diffing whole groups of objects at once has three effects:
+
+ - Generation is fast.  One pass over the changed data replaces
+   thousands of per-file deltas, and identical regions are skipped at
+   over a gigabyte per second.
+ - Directory metadata is diffed too.  In the classic scheme new
+   `dirtree` objects are shipped whole, which for a small update is
+   often most of the delta.
+ - Files that moved are still matched.  Content is paired by group,
+   not by path, so a rebuilt binary inside a renamed directory (for
+   example one whose name contains a build hash) diffs against its
+   previous version.
+
+A bulk delta has at most two parts, generated concurrently:
+
+ - The *modified* part holds the new metadata objects and the new
+   files whose name matches a file that is gone from the target
+   commit.  It is diffed against the metadata and files that are gone,
+   using HDiffPatch's precise in-memory differ.  For an ordinary
+   update this part is the entire delta.
+ - The *new* part holds all other new files, diffed against old files
+   sharing a name with HDiffPatch's low-memory block-matching
+   differ.  This is mostly content with nothing to diff against, so
+   its cost is compression.
+
+A name is a file's basename.  A new file with no gone file of the
+same basename is matched once more with runs of digits treated as
+equal, so that `libfoo.so.1.3.0` is paired with a gone
+`libfoo.so.1.2.3`: a library whose version is part of its file name
+still gets the precise differ when it is upgraded.
+
+For a `from NULL` delta there is nothing to diff, and a single part
+simply holds the compressed stream.
+
+`--effort=N` chooses the tradeoff between generation time and size,
+from 0 (as fast as possible, for development loops) to 9 (as small as
+possible, for expensive links); the default is 4.  For an ordinary
+update the effort barely matters: a diff of a few megabytes or less is
+always compressed at the strongest setting, since that takes no time.
+It matters when there is a lot of new content.
+
+| Effort | Compression | Use |
+|---|---|---|
+| 0 | zstd 1 | Fastest.  Local development loops, where the delta is not sent anywhere slow. |
+| 1 | zstd 3 | About one eighth smaller than 0 for little more time. |
+| 2 | zstd 6 | |
+| 3 | zstd 8, long-distance matching, 32 MiB window | A quarter smaller than 0 at two to three times its time. |
+| 4 | zstd 10, long-distance matching, 128 MiB window | The default: most of the size zstd can give before the time climbs steeply. |
+| 5 | zstd 12, same window | |
+| 6 | zstd 16, same window | Several times slower to generate than 5. |
+| 7 | zstd 18, same window | The smallest delta that still applies at full speed. |
+| 8 | xz preset 6, 32 MiB dictionary | Smaller than any zstd effort, but two to three times slower to apply. |
+| 9 | xz preset 9, 128 MiB dictionary, one block | Smallest.  Compressed on a single thread: minutes per gigabyte. |
+
+As an indication, a 320 MB operating system tree as a `from NULL`
+delta, generated with 8 threads:
+
+| Effort | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| Size (MB) | 100 | 88 | 82 | 74 | 71 | 70 | 67 | 61 | 57 | 53 |
+| Generate (s) | 0.4 | 0.4 | 0.7 | 1.1 | 1.8 | 2.7 | 9 | 16 | 40 | 125 |
+| Apply (s) | 1.0 | 1.0 | 1.0 | 1.0 | 1.0 | 1.0 | 1.0 | 1.1 | 2.9 | 2.9 |
+
+Decompressing zstd costs the same at every level, so efforts 0-7
+differ only in the time to generate; choose among them by how long
+generation may take.  Choose 8 or 9 only when the size of the delta
+matters more than the time to apply it.  The client needs memory for
+the compression window while applying: up to 32 MiB for efforts 0-3
+and 128 MiB above.
+
+Compression is multi-threaded except at effort 9; use `--threads` to
+limit it.  The settings that are absent (xz at low presets, zstd
+13-15, zstd 19 and above) were measured and found to be both larger
+and slower than one of those listed.
+
+When a bulk part is applied, the old stream is read by random access
+directly from the repository's objects, the diff is decompressed as it
+is consumed, and each object is written out and checksummed as the new
+stream is produced.  Memory use is small and independent of the size
+of the delta.
+
+Bulk deltas use the same superblock as other deltas, so signing,
+inline parts, `ostree pull` and `ostree static-delta apply-offline`
+all work unchanged.  Their limitations:
+
+ - They need a client built with hdiffpatch support, and with zstd
+   support for efforts below 8 (`ostree --version` lists `hdiffpatch`
+   and `zstd`).  Nothing in the superblock marks a delta as bulk: a
+   client without that support, or with an `archive` repository, only
+   finds out when it reads the first part, and the pull or
+   `apply-offline` then fails.  It does not fall back to fetching
+   objects.  Only publish bulk deltas where every client that may use
+   them can apply them.
+ - They can only be applied to `bare`, `bare-user` and
+   `bare-user-only` repositories, because the old stream is read
+   directly from the stored objects.
+ - They never contain fallback objects, and the options tuning the
+   classic scheme (`--min-fallback-size`, `--max-bsdiff-size`,
+   `--max-chunk-size`, `--disable-bsdiff`) do not apply.
+
+### Private delta sources
+
+Like other deltas, a bulk delta is by default not computed against a
+file of the origin commit that is not world-readable; the new version
+of such a file is included whole.  This guarantees that the client can read every object
+it needs to apply the delta, even an unprivileged user whose repository
+has a root-owned `bare` repository as its parent.
+
+`--allow-private-sources` lifts the restriction for bulk deltas.  It is safe wherever
+updates are applied by root, or to a `bare-user` repository without such
+a parent, and can make a small delta several times smaller: the files
+that change in every build of an operating system (package caches,
+logs) are often exactly the ones that are not world-readable.
+
+### The bulk part format
+
+A bulk part starts with the byte `b` where other parts have their
+compression type, followed by:
+
+ - `y`: the compression of the header
+ - `t`: the stored length of the header (little endian)
+ - the header, a (compressed) GVariant of type
+   `(yyttaya(uuu)aa(ayay)a(uut))`
+ - the (compressed) data, to the end of the part
+
+The header contains:
+
+ - `y`: the compression of the data: `0` none, `x` xz, `z` zstd
+ - `y`: the kind of data: `0` the new stream itself, `1` an
+   uncompressed HDiffPatch single-stream diff (`HDIFFSF20`)
+ - `t`: the size of the new stream
+ - `t`: the uncompressed size of the data
+ - `ay`: the old stream, as a list of (object type, checksum) pairs
+ - `a(uuu)`, `aa(ayay)`: modes and extended attributes, as in other
+   parts
+ - `a(uut)`: for each object of the part, in the order of the part's
+   object list in the superblock: a mode index, an xattr index, and
+   its size in the new stream
+
+Metadata objects are represented in a stream by their serialized
+bytes, regular files by their content, and symbolic links by their
+target.
+
 ## Fallback objects
 
 It's possible for there to be large-ish files which might be resistant
