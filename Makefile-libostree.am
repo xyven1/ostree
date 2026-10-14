@@ -208,6 +208,11 @@ libostree_1_la_CFLAGS += $(OT_DEP_LIBARCHIVE_CFLAGS)
 libostree_1_la_LIBADD += $(OT_DEP_LIBARCHIVE_LIBS)
 endif
 
+if USE_ZSTD
+libostree_1_la_CFLAGS += $(OT_DEP_ZSTD_CFLAGS)
+libostree_1_la_LIBADD += $(OT_DEP_ZSTD_LIBS)
+endif
+
 if USE_AVAHI
 libostree_1_la_CFLAGS += $(OT_DEP_AVAHI_CFLAGS)
 libostree_1_la_LIBADD += $(OT_DEP_AVAHI_LIBS)
