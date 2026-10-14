@@ -33,7 +33,7 @@ if ! curl --help all | grep -q -e '--aws-sigv4'; then
     skip "curl with --aws-sigv4 is required to request temporary credentials"
 fi
 
-echo '1..9'
+echo '1..10'
 
 cd ${test_tmpdir}
 
@@ -52,6 +52,8 @@ mkdir -p files/sub
 for i in $(seq 1 200); do
     echo "content ${i}" > files/sub/file-${i}
 done
+# One incompressible 20 MiB file, large enough to be fetched in several ranges.
+head -c 20971520 /dev/urandom > files/big.bin
 ostree_repo_init srv --mode=archive
 found_plus=false
 for attempt in $(seq 1 60); do
@@ -186,9 +188,11 @@ count_connections () {
 }
 serial=$(count_connections 1)
 parallel=$(count_connections 16)
-# One connection per fetcher instance; a pull creates at most three.
-test "${serial}" -ge 1 -a "${serial}" -le 3 \
-    || fatal "expected 1-3 connections at concurrency 1, got ${serial}"
+# One connection per fetcher instance (a pull creates at most three), plus
+# four for the extra ranges of the 20 MiB object, which are fetched in parallel
+# whatever the request limit is.
+test "${serial}" -ge 1 -a "${serial}" -le 7 \
+    || fatal "expected 1-7 connections at concurrency 1, got ${serial}"
 test "${parallel}" -gt "${serial}" \
     || fatal "expected more connections at concurrency 16 (${parallel}) than at 1 (${serial})"
 test "${parallel}" -le 48 \
@@ -213,3 +217,16 @@ elapsed=$(( $(date +%s) - start ))
 assert_streq "$(${CMD_PREFIX} ostree --repo=repo9 rev-parse main)" "${srv_rev}"
 test "${elapsed}" -le 5 || fatal "endpoint pull without a region took ${elapsed}s"
 echo "ok endpoint without region"
+
+# 10: a large object is fetched as parallel ranged requests, and the result
+# still passes ostree's own checksum verification
+new_client_repo repo10 "${s3url}"
+OSTREE_DEBUG_HTTP=1 ostree_as ${root_user} ${root_secret} "" --repo=repo10 pull \
+    --disable-static-deltas origin main 2>debug.txt >/dev/null
+assert_file_has_content debug.txt 'Range: bytes=0-4194303'
+assert_file_has_content debug.txt 'Range: bytes=4194304-8388607'
+assert_file_has_content debug.txt 'Range: bytes=16777216-'
+${CMD_PREFIX} ostree --repo=repo10 fsck >/dev/null
+${CMD_PREFIX} ostree --repo=repo10 checkout main checkout10
+cmp files/big.bin checkout10/big.bin
+echo "ok large object fetched in ranges"
