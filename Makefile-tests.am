@@ -132,6 +132,7 @@ _installed_or_uninstalled_test_scripts = \
 	tests/test-reset-nonlinear.sh \
 	tests/test-oldstyle-partial.sh \
 	tests/test-delta.sh \
+	tests/test-delta-hdiff.sh \
 	tests/test-delta-sign.sh \
 	tests/test-delta-ed25519.sh \
 	tests/test-xattrs.sh \
@@ -422,6 +423,17 @@ tests_test_lzma_SOURCES = src/libostree/ostree-lzma-common.c src/libostree/ostre
 	src/libostree/ostree-lzma-decompressor.c src/libotutil/ot-fs-utils.c tests/test-lzma.c
 tests_test_lzma_CFLAGS = $(TESTS_CFLAGS) $(OT_DEP_LZMA_CFLAGS)
 tests_test_lzma_LDADD = $(TESTS_LDADD) $(OT_DEP_LZMA_LIBS)
+
+if USE_HDIFFPATCH
+_installed_or_uninstalled_test_programs += tests/test-hdiff
+tests_test_hdiff_SOURCES = tests/test-hdiff.c
+# libostree-hdiff.la contains C++.  This (never built) source makes automake
+# link the test with the C++ compiler, which adds its runtime; fine here, as
+# the test only exists when HDiffPatch, and so a C++ compiler, is there.
+nodist_EXTRA_tests_test_hdiff_SOURCES = tests/test-dummy-cxx-link.cxx
+tests_test_hdiff_CFLAGS = $(TESTS_CFLAGS)
+tests_test_hdiff_LDADD = libostree-hdiff.la $(TESTS_LDADD)
+endif
 
 tests_test_rfc2616_dates_SOURCES = \
 	src/libostree/ostree-date-utils.c \

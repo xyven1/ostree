@@ -126,6 +126,9 @@ libostree_1_la_SOURCES = \
 	src/libostree/ostree-bootloader-uboot.c \
 	src/libostree/ostree-repo-static-delta-core.c \
 	src/libostree/ostree-repo-static-delta-processing.c \
+	src/libostree/ostree-repo-static-delta-bulk.c \
+	src/libostree/ostree-delta-compress.c \
+	src/libostree/ostree-delta-compress.h \
 	src/libostree/ostree-repo-static-delta-compilation.c \
 	src/libostree/ostree-repo-static-delta-compilation-analysis.c \
 	src/libostree/ostree-repo-static-delta-private.h \
@@ -206,6 +209,19 @@ EXTRA_libostree_1_la_DEPENDENCIES = $(symbol_files)
 if USE_LIBARCHIVE
 libostree_1_la_CFLAGS += $(OT_DEP_LIBARCHIVE_CFLAGS)
 libostree_1_la_LIBADD += $(OT_DEP_LIBARCHIVE_LIBS)
+endif
+
+if USE_ZSTD
+libostree_1_la_CFLAGS += $(OT_DEP_ZSTD_CFLAGS)
+libostree_1_la_LIBADD += $(OT_DEP_ZSTD_LIBS)
+endif
+
+if USE_HDIFFPATCH
+# libostree-hdiff.la contains C++, so link its runtime too (see
+# HDIFFPATCH_CXX_LIBS in configure.ac).  Not by giving libostree a C++
+# source: automake would then always link it as C++, even when HDiffPatch
+# is not built and there is no C++ compiler.
+libostree_1_la_LIBADD += libostree-hdiff.la $(HDIFFPATCH_CXX_LIBS)
 endif
 
 if USE_AVAHI

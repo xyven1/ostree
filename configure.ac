@@ -18,6 +18,7 @@ AC_SYS_LARGEFILE
 
 AC_PROG_CC
 AM_PROG_CC_C_O
+AC_PROG_CXX
 AC_PROG_YACC
 
 dnl Versioning information
@@ -144,6 +145,61 @@ dnl Needed for rollsum
 ZLIB_DEPENDENCY=zlib
 PKG_CHECK_MODULES(OT_DEP_ZLIB, $ZLIB_DEPENDENCY)
 REQUIRES_PRIVATE="${REQUIRES_PRIVATE} ${ZLIB_DEPENDENCY}"
+
+dnl Optional: zstd compression for bulk static deltas
+ZSTD_DEPENDENCY="libzstd >= 1.4.0"
+AC_ARG_WITH([zstd],
+  [AS_HELP_STRING([--with-zstd], [Enable zstd compression of bulk static deltas @<:@default=auto@:>@])],
+  [], [with_zstd=auto])
+AS_IF([test x$with_zstd != xno], [
+  PKG_CHECK_MODULES([OT_DEP_ZSTD], [$ZSTD_DEPENDENCY], [have_zstd=yes], [have_zstd=no])
+  AS_IF([test x$have_zstd = xno && test x$with_zstd = xyes],
+    [AC_MSG_ERROR([--with-zstd was given, but $ZSTD_DEPENDENCY was not found])])
+  with_zstd=$have_zstd
+])
+AS_IF([test x$with_zstd = xyes], [
+  AC_DEFINE([HAVE_ZSTD], 1, [Define if we have libzstd])
+  REQUIRES_PRIVATE="${REQUIRES_PRIVATE} ${ZSTD_DEPENDENCY}"
+  OSTREE_FEATURES="$OSTREE_FEATURES zstd"
+])
+AM_CONDITIONAL([USE_ZSTD], [test x$with_zstd = xyes])
+
+dnl Optional: HDiffPatch (bundled as a git submodule) for bulk static deltas
+AC_ARG_VAR([HDIFFPATCH_CXX_LIBS], [C++ runtime library linked into libostree with HDiffPatch @<:@-lstdc++@:>@])
+: ${HDIFFPATCH_CXX_LIBS=-lstdc++}
+AC_ARG_WITH([hdiffpatch],
+  [AS_HELP_STRING([--with-hdiffpatch], [Enable bulk static deltas using the bundled HDiffPatch @<:@default=auto@:>@])],
+  [], [with_hdiffpatch=auto])
+AS_IF([test x$with_hdiffpatch != xno], [
+  dnl AC_PROG_CXX sets CXX even when there is no C++ compiler, so try one
+  AS_IF([test -f "$srcdir/hdiffpatch/libHDiffPatch/HDiff/diff.h"], [
+    AC_LANG_PUSH([C++])
+    AC_LINK_IFELSE([AC_LANG_PROGRAM([[#include <vector>]], [[std::vector<int> v; v.push_back (1);]])],
+      [have_hdiffpatch=yes], [have_hdiffpatch=no])
+    AC_LANG_POP([C++])
+  ], [have_hdiffpatch=no])
+  dnl libostree is linked by the C compiler, so it needs the C++ runtime named
+  AS_IF([test x$have_hdiffpatch = xyes], [
+    AC_MSG_CHECKING([whether the C compiler links $HDIFFPATCH_CXX_LIBS])
+    save_LIBS=$LIBS
+    LIBS="$HDIFFPATCH_CXX_LIBS $LIBS"
+    AC_LINK_IFELSE([AC_LANG_PROGRAM([], [])], [AC_MSG_RESULT([yes])],
+      [AC_MSG_RESULT([no]); have_hdiffpatch=no
+       AS_IF([test x$with_hdiffpatch = xyes],
+         [AC_MSG_ERROR([cannot link $HDIFFPATCH_CXX_LIBS; set HDIFFPATCH_CXX_LIBS to the C++ runtime library, for example -lc++])])])
+    LIBS=$save_LIBS
+  ])
+  AS_IF([test x$have_hdiffpatch = xno && test x$with_hdiffpatch = xyes],
+    [AC_MSG_ERROR([--with-hdiffpatch was given, but the hdiffpatch submodule or a C++ compiler is missing])])
+  with_hdiffpatch=$have_hdiffpatch
+])
+AS_IF([test x$with_hdiffpatch = xyes], [
+  AC_DEFINE([HAVE_HDIFFPATCH], 1, [Define if we have HDiffPatch])
+  OSTREE_FEATURES="$OSTREE_FEATURES hdiffpatch"
+  dnl For static linking of libostree, which then contains C++
+  LIBS_PRIVATE="${LIBS_PRIVATE:+$LIBS_PRIVATE }${HDIFFPATCH_CXX_LIBS}"
+])
+AM_CONDITIONAL([USE_HDIFFPATCH], [test x$with_hdiffpatch = xyes])
 
 dnl We're not actually linking to this, just using the header
 PKG_CHECK_MODULES(OT_DEP_E2P, e2p)
@@ -755,6 +811,8 @@ echo "
     libsodium (ed25519 signatures):               $with_ed25519_libsodium
     openssl (ed25519 and spki signatures):        $with_openssl
     libarchive (parse tar files directly):        $with_libarchive
+    zstd (bulk static delta compression):         $with_zstd
+    hdiffpatch (bulk static deltas):              $with_hdiffpatch
     static deltas:                                yes (always enabled now)
     O_TMPFILE:                                    $enable_otmpfile
     wrpseudo-compat:                              $enable_wrpseudo_compat

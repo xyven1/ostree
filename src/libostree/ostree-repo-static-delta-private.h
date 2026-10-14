@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include "libglnx.h"
 #include "ostree-core.h"
 
 G_BEGIN_DECLS
@@ -139,6 +140,49 @@ typedef enum
 } OstreeStaticDeltaOpCode;
 #define OSTREE_STATIC_DELTA_N_OPS 7
 
+/* Values of the leading compression byte of a delta part.  Classic parts
+ * are uncompressed or xz; zstd is only used inside bulk parts.
+ */
+#define OSTREE_STATIC_DELTA_COMPRESSION_NONE 0
+#define OSTREE_STATIC_DELTA_COMPRESSION_XZ 'x'
+#define OSTREE_STATIC_DELTA_COMPRESSION_ZSTD 'z'
+
+/**
+ * Bulk delta parts
+ *
+ * A delta part whose leading byte is OSTREE_STATIC_DELTA_PART_BULK does
+ * not use OSTREE_STATIC_DELTA_PART_PAYLOAD_FORMAT_V0.  Instead its objects,
+ * in the order of the part's object array, are concatenated into one "new"
+ * stream (metadata objects as their serialized bytes, regular files as their
+ * content, symlinks as their target), and the part carries either that
+ * stream itself or an HDiffPatch single-stream diff producing it from an
+ * "old" stream: the concatenation of a list of objects the client is
+ * expected to already have.  Layout after the leading byte:
+ *
+ *   y                  compression of the header
+ *   t                  stored length of the header (little endian)
+ *   header             (compressed) OSTREE_STATIC_DELTA_BULK_HEADER_FORMAT
+ *   ...                the (compressed) data, to the end of the part
+ *
+ * Header:
+ *   y        compression of the data: an OSTREE_STATIC_DELTA_COMPRESSION_* value
+ *   y        kind: OSTREE_STATIC_DELTA_BULK_KIND_*
+ *   t        size of the new stream (little endian)
+ *   t        uncompressed size of the data (little endian)
+ *   ay       old stream sources: (guint8 objtype, csum object) each
+ *   a(uuu)   modes, as in OSTREE_STATIC_DELTA_PART_PAYLOAD_FORMAT_V0
+ *   aa(ayay) xattrs, likewise
+ *   a(uut)   per new object: mode index, xattr index, size in the stream
+ *            (little endian; the indexes are 0 for metadata objects)
+ */
+#define OSTREE_STATIC_DELTA_PART_BULK 'b'
+#define OSTREE_STATIC_DELTA_BULK_HEADER_FORMAT "(yyttaya(uuu)aa(ayay)a(uut))"
+#define OSTREE_STATIC_DELTA_BULK_KIND_RAW 0
+#define OSTREE_STATIC_DELTA_BULK_KIND_HDIFF 1
+
+#define OSTREE_STATIC_DELTA_BULK_EFFORT_MAX 9
+#define OSTREE_STATIC_DELTA_BULK_EFFORT_DEFAULT 4
+
 gboolean _ostree_static_delta_part_open (GInputStream *part_in, GBytes *inline_part_bytes,
                                          OstreeStaticDeltaOpenFlags flags,
                                          const char *expected_checksum, GVariant **out_part,
@@ -160,6 +204,41 @@ void _ostree_static_delta_part_execute_async (OstreeRepo *repo, GVariant *header
 
 gboolean _ostree_static_delta_part_execute_finish (OstreeRepo *repo, GAsyncResult *result,
                                                    GError **error);
+
+typedef struct
+{
+  /* 0 (fastest) to OSTREE_STATIC_DELTA_BULK_EFFORT_MAX (smallest) */
+  guint effort;
+  /* 0: one per processor */
+  guint threads;
+  gboolean verbose;
+  gboolean swap_endian;
+  /* Also diff against files that are not world readable */
+  gboolean private_sources;
+} OstreeStaticDeltaBulkOptions;
+
+typedef struct
+{
+  GLnxTmpfile tmpf;
+  /* OSTREE_STATIC_DELTA_META_ENTRY_FORMAT */
+  GVariant *header;
+  guint64 compressed_size;
+  guint64 uncompressed_size;
+} OstreeStaticDeltaBulkPart;
+
+void _ostree_static_delta_bulk_part_free (OstreeStaticDeltaBulkPart *part);
+
+gboolean _ostree_static_delta_bulk_generate (OstreeRepo *repo, const char *from, const char *to,
+                                               const OstreeStaticDeltaBulkOptions *options,
+                                               int parts_dfd, GPtrArray *out_parts,
+                                               GCancellable *cancellable, GError **error);
+
+gboolean _ostree_static_delta_bulk_part_execute (OstreeRepo *repo, GVariant *objects,
+                                                   GVariant *part, gboolean stats_only,
+                                                   GCancellable *cancellable, GError **error);
+
+gboolean _ostree_static_delta_bulk_part_describe (GVariant *part, char **out_description,
+                                                    GError **error);
 
 gboolean _ostree_static_delta_parse_checksum_array (GVariant *array, guint8 **out_checksums_array,
                                                     guint *out_n_checksums, GError **error);
