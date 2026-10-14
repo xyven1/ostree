@@ -165,6 +165,8 @@ struct FetcherRequest
   guint64 s3_range_first;      /* parent: bytes covered by its own response */
   guint64 s3_range_total;      /* parent: size of the whole object */
   gboolean s3_range_disabled;  /* parent: server refused the range, don't ask again */
+  gboolean s3_range_started;   /* parent: decided to fetch the rest in ranges */
+  gboolean s3_range_restart;   /* parent: abandon this attempt and fetch it whole */
   gboolean s3_range_pending;   /* parent: children are about to be started */
   gboolean s3_range_self_done; /* parent: own transfer finished, waiting for children */
   guint s3_range_children;     /* parent: children still running */
@@ -727,14 +729,24 @@ s3_range_finish_parent (OstreeFetcher *self, GTask *ptask)
 {
   FetcherRequest *preq = g_task_get_task_data (ptask);
 
+  struct stat stbuf;
+
   if (preq->s3_range_error != NULL)
     g_task_return_error (ptask, g_steal_pointer (&preq->s3_range_error));
-  else if (lseek (preq->tmpf.fd, 0, SEEK_SET) < 0)
+  else if (fstat (preq->tmpf.fd, &stbuf) < 0 || lseek (preq->tmpf.fd, 0, SEEK_SET) < 0)
     {
       GError *error = NULL;
       glnx_set_error_from_errno (&error);
       g_task_return_error (ptask, error);
     }
+  else if ((guint64)stbuf.st_size != preq->s3_range_total)
+    /* Every part checked its own length, so this cannot happen; but with
+     * --http-trusted the file is linked into the repo unverified, so make
+     * sure of it. */
+    g_task_return_new_error (ptask, G_IO_ERROR, G_IO_ERROR_FAILED,
+                             "Ranged fetch assembled %" G_GUINT64_FORMAT
+                             " bytes, expected %" G_GUINT64_FORMAT,
+                             (guint64)stbuf.st_size, preq->s3_range_total);
   else
     g_task_return_boolean (ptask, TRUE);
 
@@ -855,6 +867,11 @@ check_multi_info (OstreeFetcher *fetcher)
 
       gboolean retry_all = (!is_file && req->fetcher->opt_retry_all);
 
+#ifdef HAVE_AWS
+      if (req->s3_range_restart)
+        s3_retry = TRUE; /* nothing was written; ask again without a range */
+      else
+#endif
       if (req->caught_write_error)
         g_task_return_error (task, g_steal_pointer (&req->caught_write_error));
       else if (curlres != CURLE_OK)
@@ -1196,6 +1213,29 @@ write_cb (void *ptr, size_t size, size_t nmemb, void *data)
           req->fetcher->bytes_transferred += realsize;
           return realsize;
         }
+
+      if (req->s3_range_total > req->s3_range_first && !req->s3_range_started)
+        {
+          /* This is the first part of a larger object, and by the first
+           * byte of the body every header is in. The rest may only be
+           * fetched separately if it can be tied to this response, which
+           * takes a strong ETag for If-Match. Otherwise an object replaced
+           * mid-download could be stitched together from two versions, so
+           * drop this attempt before writing anything and fetch it whole. */
+          if (req->out_etag == NULL || g_str_has_prefix (req->out_etag, "W/"))
+            {
+              req->s3_range_disabled = TRUE;
+              req->s3_range_restart = TRUE;
+              return -1;
+            }
+          req->s3_range_started = TRUE;
+          req->s3_range_pending = TRUE;
+          /* Transfers can't be added from inside a curl callback. */
+          GSource *source = g_idle_source_new ();
+          g_source_set_callback (source, s3_range_spawn_idle, g_object_ref (task), g_object_unref);
+          g_source_attach (source, req->fetcher->mainctx);
+          g_source_unref (source);
+        }
     }
 #endif
 
@@ -1289,15 +1329,6 @@ response_header_cb (const char *buffer, size_t size, size_t n_items, void *user_
                     = g_error_new (G_IO_ERROR, G_IO_ERROR_FAILED,
                                    "Object exceeded maximum size of %" G_GUINT64_FORMAT " bytes",
                                    req->max_size);
-            }
-          else if (total > req->s3_range_first)
-            {
-              req->s3_range_pending = TRUE;
-              GSource *source = g_idle_source_new ();
-              g_source_set_callback (source, s3_range_spawn_idle, g_object_ref (task),
-                                     g_object_unref);
-              g_source_attach (source, req->fetcher->mainctx);
-              g_source_unref (source);
             }
         }
     }
@@ -1506,6 +1537,8 @@ initiate_next_curl_request (FetcherRequest *req, GTask *task)
       req->s3_range_part = 0;
       req->s3_range_first = 0;
       req->s3_range_total = 0;
+      req->s3_range_started = FALSE;
+      req->s3_range_restart = FALSE;
       if (req->s3_range_parent != NULL)
         {
           FetcherRequest *preq = g_task_get_task_data (req->s3_range_parent);
@@ -1513,12 +1546,11 @@ initiate_next_curl_request (FetcherRequest *req, GTask *task)
               "Range: bytes=%" G_GUINT64_FORMAT "-%" G_GUINT64_FORMAT, req->s3_range_offset,
               req->s3_range_offset + req->s3_range_length - 1);
           req->req_headers = curl_slist_append (req->req_headers, range);
-          /* Refuse to stitch together parts of two different objects. */
-          if (preq->out_etag != NULL)
-            {
-              g_autofree char *if_match = g_strconcat ("If-Match: ", preq->out_etag, NULL);
-              req->req_headers = curl_slist_append (req->req_headers, if_match);
-            }
+          /* Refuse to stitch together parts of two different objects. The
+           * parent only starts children once it has a strong ETag. */
+          g_assert (preq->out_etag != NULL);
+          g_autofree char *if_match = g_strconcat ("If-Match: ", preq->out_etag, NULL);
+          req->req_headers = curl_slist_append (req->req_headers, if_match);
           req->s3_range_written = 0;
         }
       else if (s3_range_eligible (req))

@@ -218,10 +218,11 @@ EXTRA_DIST += $(libsoup_tests)
 endif
 
 if USE_AWS
-_installed_or_uninstalled_test_scripts += tests/test-pull-s3.sh
+_installed_or_uninstalled_test_scripts += tests/test-pull-s3.sh tests/test-pull-s3-faults.sh
 else
-EXTRA_DIST += tests/test-pull-s3.sh
+EXTRA_DIST += tests/test-pull-s3.sh tests/test-pull-s3-faults.sh
 endif
+EXTRA_DIST += tests/s3-fault-server.py
 
 # These call into gjs scripts
 js_tests = tests/test-corruption.sh tests/test-pull-corruption.sh
