@@ -165,6 +165,8 @@ AS_IF([test x$with_zstd = xyes], [
 AM_CONDITIONAL([USE_ZSTD], [test x$with_zstd = xyes])
 
 dnl Optional: HDiffPatch (bundled as a git submodule) for bulk static deltas
+AC_ARG_VAR([HDIFFPATCH_CXX_LIBS], [C++ runtime library linked into libostree with HDiffPatch @<:@-lstdc++@:>@])
+: ${HDIFFPATCH_CXX_LIBS=-lstdc++}
 AC_ARG_WITH([hdiffpatch],
   [AS_HELP_STRING([--with-hdiffpatch], [Enable bulk static deltas using the bundled HDiffPatch @<:@default=auto@:>@])],
   [], [with_hdiffpatch=auto])
@@ -176,6 +178,17 @@ AS_IF([test x$with_hdiffpatch != xno], [
       [have_hdiffpatch=yes], [have_hdiffpatch=no])
     AC_LANG_POP([C++])
   ], [have_hdiffpatch=no])
+  dnl libostree is linked by the C compiler, so it needs the C++ runtime named
+  AS_IF([test x$have_hdiffpatch = xyes], [
+    AC_MSG_CHECKING([whether the C compiler links $HDIFFPATCH_CXX_LIBS])
+    save_LIBS=$LIBS
+    LIBS="$HDIFFPATCH_CXX_LIBS $LIBS"
+    AC_LINK_IFELSE([AC_LANG_PROGRAM([], [])], [AC_MSG_RESULT([yes])],
+      [AC_MSG_RESULT([no]); have_hdiffpatch=no
+       AS_IF([test x$with_hdiffpatch = xyes],
+         [AC_MSG_ERROR([cannot link $HDIFFPATCH_CXX_LIBS; set HDIFFPATCH_CXX_LIBS to the C++ runtime library, for example -lc++])])])
+    LIBS=$save_LIBS
+  ])
   AS_IF([test x$have_hdiffpatch = xno && test x$with_hdiffpatch = xyes],
     [AC_MSG_ERROR([--with-hdiffpatch was given, but the hdiffpatch submodule or a C++ compiler is missing])])
   with_hdiffpatch=$have_hdiffpatch

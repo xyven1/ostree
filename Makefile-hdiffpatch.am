@@ -5,9 +5,15 @@
 # Builds the subset of HDiffPatch (https://github.com/sisong/HDiffPatch, MIT)
 # used by bulk static deltas, and our C wrapper around it.
 
-# The sources below are distributed automatically, the headers they include are not
+# The sources below are distributed automatically, the headers they include are not.
+# Whole directories are copied, so drop what an in-tree build left in them.
 EXTRA_DIST += $(libhdiffpatch_srcpath)/LICENSE $(libhdiffpatch_srcpath)/README.md \
 	$(libhdiffpatch_srcpath)/libHDiffPatch $(libhdiffpatch_srcpath)/libParallel
+dist-hook: dist-hook-hdiffpatch
+dist-hook-hdiffpatch:
+	find $(distdir)/$(libhdiffpatch_srcpath) \( -name '*.o' -o -name '*.lo' -o -name .deps \
+	  -o -name .libs -o -name .dirstamp \) -prune -exec rm -rf {} +
+.PHONY: dist-hook-hdiffpatch
 
 noinst_LTLIBRARIES += libhdiffpatch.la
 

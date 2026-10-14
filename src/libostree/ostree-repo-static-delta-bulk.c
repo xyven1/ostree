@@ -1883,11 +1883,12 @@ stream_sink_finish_object (StreamSink *self, GError **error)
   else
     {
       char actual_checksum[OSTREE_SHA256_STRING_LEN + 1];
-      /* This verifies the checksum given to _ostree_repo_bare_content_open() */
+      /* This verifies the checksum given to _ostree_repo_bare_content_open(),
+       * and cleans up
+       */
       if (!_ostree_repo_bare_content_commit (self->repo, &self->content_out, actual_checksum,
                                              sizeof (actual_checksum), self->cancellable, error))
         return FALSE;
-      _ostree_repo_bare_content_cleanup (&self->content_out);
     }
 
   self->started = FALSE;
