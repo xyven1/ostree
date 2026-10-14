@@ -2,7 +2,8 @@
 #
 # It builds straight from the git tree (running autogen.sh), with zstd and HDiffPatch enabled, and
 # leaves out what an update client does not need: GPG, libsoup, SELinux, systemd integration,
-# FUSE, man pages, API docs and introspection.  Fetching is done with libcurl.
+# FUSE, man pages, API docs and introspection.  Fetching is done with libcurl, checksums with
+# OpenSSL.
 {
   lib,
   stdenv,
@@ -22,9 +23,11 @@
   openssl,
   # The source tree, including the bsdiff, libglnx and hdiffpatch submodules
   src,
-  # Use OpenSSL's SHA-256 instead of GLib's (several times faster where the CPU has SHA
-  # instructions).  Off by default to match the build the benchmarks were taken with.
-  withOpenssl ? false,
+  # Use OpenSSL's SHA-256 instead of GLib's.  Every object written is hashed, and with a CPU
+  # that has SHA instructions OpenSSL is several times faster: on an aarch64 device applying a
+  # delta took a quarter to a half less time.  The OpenSSL passed in must be built with its
+  # assembly (see cross-aarch64.nix); a C-only one is slower than GLib.
+  withOpenssl ? true,
 }:
 
 stdenv.mkDerivation {

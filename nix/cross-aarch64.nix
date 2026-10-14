@@ -12,11 +12,32 @@
 # the bsdiff, libglnx and hdiffpatch submodules must be checked out.
 {
   pkgs ? import <nixpkgs> { },
-  withOpenssl ? false,
+  withOpenssl ? true,
 }:
 
 let
-  cross = pkgs.pkgsCross.aarch64-multiplatform;
+  # nixpkgs cross-compiles OpenSSL for aarch64 with its generic C-only target, which makes its
+  # SHA-256 no faster than GLib's.  When OpenSSL is wanted, build it (and so everything that
+  # links it) with the aarch64 target, which uses the CPU's SHA instructions.
+  opensslWithAsm = final: prev: {
+    openssl =
+      if prev.stdenv.hostPlatform.isAarch64 && prev.stdenv.hostPlatform != prev.stdenv.buildPlatform then
+        prev.openssl.overrideAttrs (_: {
+          configureScript = "./Configure linux-aarch64";
+        })
+      else
+        prev.openssl;
+  };
+
+  cross =
+    if withOpenssl then
+      import pkgs.path {
+        localSystem = pkgs.stdenv.buildPlatform.system;
+        crossSystem = pkgs.pkgsCross.aarch64-multiplatform.stdenv.hostPlatform.config;
+        overlays = [ opensslWithAsm ];
+      }
+    else
+      pkgs.pkgsCross.aarch64-multiplatform;
 
   src = builtins.fetchGit {
     url = ./..;
@@ -45,7 +66,7 @@ rec {
         cat > $out/README <<EOF
         ostree for aarch64, with hdiff, zstd and bulk static delta support.
 
-        Install:  tar --extract --zstd --file ostree-aarch64.tar.zst --directory /
+        Install:  zstd -dc ostree-aarch64.tar.zst | tar -x -C /       (as root)
         Run:      ${ostree}/bin/ostree --version
 
         Contents ($(wc -l < paths) store paths, $(du -sh --apparent-size $out/ostree-aarch64.tar.zst | cut -f1) compressed):
