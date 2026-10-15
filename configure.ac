@@ -248,6 +248,7 @@ AS_IF([test x$with_aws != xno], [
   LIBS=$save_LIBS
   with_aws=yes
   AC_DEFINE([HAVE_AWS], 1, [Define if s3:// remotes are supported via aws-c-auth])
+  OSTREE_FEATURES="$OSTREE_FEATURES aws"
 ])
 AM_CONDITIONAL(USE_AWS, test x$with_aws = xyes)
 AC_ARG_ENABLE(http2,
