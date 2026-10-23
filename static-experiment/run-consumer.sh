@@ -21,8 +21,8 @@ env -i "$bin" "$work/a"
 echo "== http:// pull"
 mkdir -p "$work/b"
 # Pre-seed src-repo by running once, then serve it and pull from a fresh dir.
-env -i "$bin" -b smoke/http "$work/seed" > /dev/null
+env -i "$bin" --ref smoke/http "$work/seed" > /dev/null
 python3 -m http.server -d "$work/seed/src-repo" -b 127.0.0.1 18765 > "$work/http.log" 2>&1 &
 srv=$!
 sleep 1
-env -i "$bin" --branch smoke/http "$work/b" http://127.0.0.1:18765 || { cat "$work/http.log"; exit 1; }
+env -i "$bin" --ref smoke/http "$work/b" http://127.0.0.1:18765 || { cat "$work/http.log"; exit 1; }
