@@ -247,6 +247,8 @@ AS_IF([test x$with_aws != xno], [
   CPPFLAGS=$save_CPPFLAGS
   LIBS=$save_LIBS
   with_aws=yes
+  dnl For static linking of libostree; the AWS libraries have no .pc files.
+  LIBS_PRIVATE="${LIBS_PRIVATE:+$LIBS_PRIVATE }${AWS_LIBS}"
   AC_DEFINE([HAVE_AWS], 1, [Define if s3:// remotes are supported via aws-c-auth])
   OSTREE_FEATURES="$OSTREE_FEATURES aws"
 ])
