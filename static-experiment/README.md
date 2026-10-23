@@ -21,6 +21,9 @@ static-experiment/run-consumer.sh      # file:// and http:// pull, commit, check
   glib/gio 0.20) with `SYSTEM_DEPS_LINK=static`. It is 22 MB stripped and
   static. It creates an archive repo, commits, pulls over file:// and over
   http:// (the static curl fetcher), then checks out.
+- Usage: `ostree-static-consumer [-b|--branch <ref>] <workdir> [remote-url]`.
+  With a URL, `<ref>` can be any branch on that remote; the contents check
+  runs only when the pulled commit is the tool's own test commit.
 - Both binaries run in `bwrap --tmpfs / --clearenv --unshare-all` with only the
   binary bound in: no /nix, /usr, /lib or /bin/sh. The CLI runs init, commit,
   log and fsck there.

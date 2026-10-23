@@ -1,18 +1,20 @@
 //! Smoke test for a Rust binary with libostree linked in statically.
 //!
-//! Usage: ostree-static-consumer <workdir> [remote-url]
+//! Usage: ostree-static-consumer [-b|--branch <ref>] <workdir> [remote-url]
 //!
-//! Creates <workdir>/src-repo (archive) with one commit of a small tree,
-//! pulls it into <workdir>/dst-repo from `remote-url` (default: file:// of
-//! src-repo; pass an http:// URL serving src-repo to exercise the curl
-//! fetcher), then checks the commit out and verifies a file's contents.
+//! Creates <workdir>/src-repo (archive) with one commit of a small tree on
+//! <ref> (default static/test), pulls <ref> into <workdir>/dst-repo from
+//! `remote-url` (default: file:// of src-repo; pass an http:// URL to
+//! exercise the curl fetcher), then checks it out. When the pulled commit is
+//! the one just made, a file's contents are verified too.
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use gio::prelude::*;
 
-const REF: &str = "static/test";
+const DEFAULT_REF: &str = "static/test";
+const USAGE: &str = "usage: ostree-static-consumer [-b|--branch <ref>] <workdir> [remote-url]";
 
 fn write_tree(dir: &Path) -> Result<()> {
     std::fs::create_dir_all(dir.join("etc"))?;
@@ -22,7 +24,7 @@ fn write_tree(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn commit(repo: &ostree::Repo, tree: &Path) -> Result<String> {
+fn commit(repo: &ostree::Repo, tree: &Path, branch: &str) -> Result<String> {
     let c = gio::Cancellable::NONE;
     repo.prepare_transaction(c)?;
     let mtree = ostree::MutableTree::new();
@@ -34,14 +36,31 @@ fn commit(repo: &ostree::Repo, tree: &Path) -> Result<String> {
     let root = repo.write_mtree(&mtree, c)?;
     let root = root.downcast::<ostree::RepoFile>().unwrap();
     let csum = repo.write_commit(None, Some("static test"), None, None, &root, c)?;
-    repo.transaction_set_ref(None, REF, Some(&csum));
+    repo.transaction_set_ref(None, branch, Some(&csum));
     repo.commit_transaction(c)?;
     Ok(csum.to_string())
 }
 
 fn main() -> Result<()> {
+    let mut branch = DEFAULT_REF.to_string();
+    let mut positional = Vec::new();
     let mut args = std::env::args().skip(1);
-    let work = PathBuf::from(args.next().context("usage: <workdir> [remote-url]")?);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-b" | "--branch" => branch = args.next().context(USAGE)?,
+            "-h" | "--help" => {
+                println!("{USAGE}");
+                return Ok(());
+            }
+            _ if arg.starts_with("--branch=") => branch = arg["--branch=".len()..].to_string(),
+            _ if arg.starts_with('-') => bail!("unknown option {arg}\n{USAGE}"),
+            _ => positional.push(arg),
+        }
+    }
+    ensure!(!branch.is_empty(), "empty branch\n{USAGE}");
+    let mut positional = positional.into_iter();
+    let work = PathBuf::from(positional.next().context(USAGE)?);
+    ensure!(positional.len() <= 1, "too many arguments\n{USAGE}");
     std::fs::create_dir_all(&work)?;
     let c = gio::Cancellable::NONE;
 
@@ -51,11 +70,11 @@ fn main() -> Result<()> {
     src.create(ostree::RepoMode::Archive, c)?;
     let tree = work.join("tree");
     write_tree(&tree)?;
-    let csum = commit(&src, &tree)?;
-    println!("committed {REF} = {csum}");
+    let csum = commit(&src, &tree, &branch)?;
+    println!("committed {branch} = {csum}");
 
-    // With an explicit URL the remote holds some other run's commit.
-    let explicit_url = args.next();
+    // With an explicit URL the remote holds some other commit.
+    let explicit_url = positional.next();
     let url = explicit_url
         .clone()
         .unwrap_or_else(|| format!("file://{}", work.join("src-repo").canonicalize().unwrap().display()));
@@ -64,20 +83,28 @@ fn main() -> Result<()> {
     let opts = glib::VariantDict::new(None);
     opts.insert("gpg-verify", false);
     dst.remote_add("origin", Some(&url), Some(&opts.end()), c)?;
-    dst.pull("origin", &[REF], ostree::RepoPullFlags::NONE, None, c)
-        .with_context(|| format!("pull from {url}"))?;
+    dst.pull("origin", &[branch.as_str()], ostree::RepoPullFlags::NONE, None, c)
+        .with_context(|| format!("pull {branch} from {url}"))?;
     let pulled = dst
-        .resolve_rev(&format!("origin:{REF}"), false)?
+        .resolve_rev(&format!("origin:{branch}"), false)?
         .context("ref missing after pull")?;
     ensure!(explicit_url.is_some() || pulled == csum, "pulled {pulled}, expected {csum}");
-    println!("pulled {pulled} from {url}");
+    println!("pulled {branch} = {pulled} from {url}");
 
     let co = work.join("checkout");
     let mut copts = ostree::RepoCheckoutAtOptions::default();
     copts.mode = ostree::RepoCheckoutMode::User;
     dst.checkout_at(Some(&copts), libc::AT_FDCWD, &co, &pulled, c)?;
-    let got = std::fs::read_to_string(co.join("link"))?;
-    ensure!(got == "hello from a static libostree\n", "bad checkout: {got:?}");
+    if pulled == csum {
+        let got = std::fs::read_to_string(co.join("link"))?;
+        ensure!(got == "hello from a static libostree\n", "bad checkout: {got:?}");
+    } else {
+        let mut top: Vec<_> = std::fs::read_dir(&co)?
+            .map(|e| e.map(|e| e.file_name().to_string_lossy().into_owned()))
+            .collect::<std::io::Result<_>>()?;
+        top.sort();
+        println!("top level: {}", top.join(" "));
+    }
     println!("checkout OK: {}", co.display());
     Ok(())
 }
