@@ -25,7 +25,7 @@ skip_without_user_xattrs
 skip_without_ostree_feature hdiffpatch
 skip_without_ostree_feature zstd
 
-echo '1..13'
+echo '1..14'
 
 # Deterministic pseudo-random data: compressible, but not trivially so
 gen_data() {
@@ -287,6 +287,42 @@ ${CMD_PREFIX} ostree --repo=repo ls -R -C ${verto} > expected-ver-ls.txt
 ${CMD_PREFIX} ostree --repo=target ls -R -C ${verto} > actual-ver-ls.txt
 assert_files_equal expected-ver-ls.txt actual-ver-ls.txt
 echo "ok bulk delta pairs files renamed by version"
+
+# Experiment: the same groups of objects diffed with bsdiff instead of
+# HDiffPatch (OSTREE_BENCH_BULK_DIFFER=bsdiff)
+for effort in 0 4 9; do
+    OSTREE_BENCH_BULK_DIFFER=bsdiff ${CMD_PREFIX} ostree --repo=repo static-delta generate \
+                  --from=${origrev} --to=${newrev} --inline --filename=deltas/bsdiff-${effort} \
+                  --bulk --effort=${effort} --allow-private-sources 2>&1 | tee out.txt
+    assert_file_has_content out.txt 'bulk part 1 (modified).* bsdiff='
+    apply_and_check deltas/bsdiff-${effort}
+done
+mkdir -p deltas/bsdiff-dir
+OSTREE_BENCH_BULK_DIFFER=bsdiff ${CMD_PREFIX} ostree --repo=repo-bare static-delta generate \
+              --from=${origrev} --to=${newrev} --filename=deltas/bsdiff-dir/superblock --bulk
+apply_and_check deltas/bsdiff-dir/superblock
+OSTREE_BENCH_BULK_DIFFER=bsdiff ${CMD_PREFIX} ostree --repo=repo-bare static-delta generate \
+              --from=${origrev} --to=${newrev} --bulk
+${CMD_PREFIX} ostree --repo=repo-bare static-delta show ${origrev}-${newrev} > show.txt
+assert_file_has_content show.txt 'PartPayload0: bulk kind=bsdiff'
+# Without the variable nothing changes
+${CMD_PREFIX} ostree --repo=repo-bare static-delta generate --from=${origrev} --to=${newrev} --bulk
+${CMD_PREFIX} ostree --repo=repo-bare static-delta show ${origrev}-${newrev} > show.txt
+assert_file_has_content show.txt 'PartPayload0: bulk kind=hdiff'
+# Damage reaches bspatch and fails cleanly
+size=$(stat -c '%s' deltas/bsdiff-4)
+for offset in 40 400 2000; do
+    cp deltas/bsdiff-4 damaged-inline
+    printf '\377\000\377\000\377\000\377\000' \
+        | dd of=damaged-inline bs=1 seek=$((size - offset)) conv=notrunc status=none
+    fresh_target
+    if ${CMD_PREFIX} ostree --repo=target static-delta apply-offline damaged-inline 2>err.txt; then
+        ${CMD_PREFIX} ostree --repo=target ls -R -C ${newrev} > actual-ls.txt
+        assert_files_equal expected-ls.txt actual-ls.txt
+    fi
+    ${CMD_PREFIX} ostree --repo=target fsck
+done
+echo "ok bulk delta with bsdiff"
 
 # Option validation
 if ${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} \

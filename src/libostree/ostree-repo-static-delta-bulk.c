@@ -35,6 +35,9 @@
 #include <string.h>
 #include <sys/stat.h>
 
+#include "bsdiff/bsdiff.h"
+#include "bsdiff/bspatch.h"
+
 #include "ostree-core-private.h"
 #include "ostree-delta-compress.h"
 #include "ostree-hdiff.h"
@@ -302,6 +305,93 @@ concat_propagate_error (Concat *self, GError **error)
       g_propagate_error (error, g_steal_pointer (&self->error));
     }
   return FALSE;
+}
+
+/* ------------------------------------------------------------------------ */
+/* Experiment: bsdiff in place of HDiffPatch                                 */
+/* ------------------------------------------------------------------------ */
+
+/* bspatch reads each copy or insert of the patch with one int-sized read */
+#define MAX_BSDIFF_STREAM_BYTES ((guint64)G_MAXINT)
+
+/* TEMPORARY experiment: OSTREE_BENCH_BULK_DIFFER=bsdiff diffs the same
+ * groups of objects with bsdiff, in memory, single-threaded.
+ */
+static gboolean
+bulk_use_bsdiff (void)
+{
+  return g_strcmp0 (g_getenv ("OSTREE_BENCH_BULK_DIFFER"), "bsdiff") == 0;
+}
+
+/* Read all of @self into a new buffer */
+static guint8 *
+concat_read_all (Concat *self, GError **error)
+{
+  if (self->size > MAX_BSDIFF_STREAM_BYTES)
+    return glnx_null_throw (error, "Object stream too large for bsdiff");
+  g_autofree guint8 *buf = g_malloc (MAX (self->size, 1));
+  if (!concat_read (self, 0, buf, self->size))
+    {
+      concat_propagate_error (self, error);
+      return NULL;
+    }
+  return g_steal_pointer (&buf);
+}
+
+typedef struct
+{
+  int fd;
+  GByteArray *buf;
+  guint64 size;
+  GError *error;
+} BsdiffWriter;
+
+static gboolean
+bsdiff_writer_flush (BsdiffWriter *self)
+{
+  if (self->buf->len > 0 && self->error == NULL
+      && glnx_loop_write (self->fd, self->buf->data, self->buf->len) < 0)
+    glnx_throw_errno_prefix (&self->error, "write");
+  g_byte_array_set_size (self->buf, 0);
+  return self->error == NULL;
+}
+
+static int
+bsdiff_writer_write (struct bsdiff_stream *stream, const void *buffer, int size)
+{
+  BsdiffWriter *self = stream->opaque;
+  g_byte_array_append (self->buf, buffer, size);
+  self->size += size;
+  if (self->buf->len >= IO_BUF_SIZE && !bsdiff_writer_flush (self))
+    return -1;
+  return 0;
+}
+
+/* Write a bsdiff patch from @old to @new into @out_fd */
+static gboolean
+bsdiff_concats (Concat *old, Concat *new, int out_fd, guint64 *out_size, GError **error)
+{
+  g_autofree guint8 *old_buf = concat_read_all (old, error);
+  if (!old_buf)
+    return FALSE;
+  g_autofree guint8 *new_buf = concat_read_all (new, error);
+  if (!new_buf)
+    return FALSE;
+
+  g_autoptr (GByteArray) buf = g_byte_array_sized_new (IO_BUF_SIZE + 64 * 1024);
+  BsdiffWriter writer = { out_fd, buf, 0, NULL };
+  struct bsdiff_stream stream = { &writer, g_malloc, g_free, bsdiff_writer_write };
+  const int r = bsdiff (old_buf, old->size, new_buf, new->size, &stream);
+  if (!bsdiff_writer_flush (&writer) || r < 0)
+    {
+      if (writer.error)
+        g_propagate_error (error, writer.error);
+      else
+        glnx_throw (error, "bsdiff generation failed");
+      return FALSE;
+    }
+  *out_size = writer.size;
+  return TRUE;
 }
 
 typedef struct
@@ -1026,9 +1116,18 @@ generator_emit_part (BulkGenerator *self, const char *name, guint part_index, GA
     0,
   };
   guint64 data_size;
+  const gboolean use_bsdiff = use_diff && bulk_use_bsdiff ();
 
   if (!use_diff)
     data_size = new_concat->size;
+  else if (use_bsdiff)
+    {
+      if (!glnx_open_tmpfile_linkable_at (self->parts_dfd, ".", O_RDWR | O_CLOEXEC, &diff_tmpf,
+                                          error))
+        return FALSE;
+      if (!bsdiff_concats (old_concat, new_concat, diff_tmpf.fd, &data_size, error))
+        return FALSE;
+    }
   else
     {
 #ifdef HAVE_HDIFFPATCH
@@ -1122,7 +1221,9 @@ generator_emit_part (BulkGenerator *self, const char *name, guint part_index, GA
 
   g_autoptr (GVariant) header = g_variant_ref_sink (g_variant_new (
       "(yytt@ay@a(uuu)@aa(ayay)@a(uut))", copts.type,
-      (guint8)(use_diff ? OSTREE_STATIC_DELTA_BULK_KIND_HDIFF : OSTREE_STATIC_DELTA_BULK_KIND_RAW),
+      (guint8)(!use_diff     ? OSTREE_STATIC_DELTA_BULK_KIND_RAW
+               : use_bsdiff ? OSTREE_STATIC_DELTA_BULK_KIND_BSDIFF
+                            : OSTREE_STATIC_DELTA_BULK_KIND_HDIFF),
       GUINT64_TO_LE (new_concat->size), GUINT64_TO_LE (data_size),
       ot_gvariant_new_bytearray (sources->data, sources->len),
       g_variant_builder_end (&modes_builder), g_variant_builder_end (&xattrs_builder),
@@ -1233,7 +1334,8 @@ generator_emit_part (BulkGenerator *self, const char *name, guint part_index, GA
         "bulk part %u (%s): objects=%u sources=%u new=%" G_GUINT64_FORMAT " old=%" G_GUINT64_FORMAT
         " %s=%" G_GUINT64_FORMAT " compressed=%" G_GUINT64_FORMAT " (%s) in %.2fs\n",
         part_index + 1, name, new_objects->len, use_diff ? old_objects->len : 0, new_concat->size,
-        old_concat->size, !use_diff ? "raw" : (mem_diff ? "diff" : "blockdiff"), data_size,
+        old_concat->size,
+        !use_diff ? "raw" : (use_bsdiff ? "bsdiff" : (mem_diff ? "diff" : "blockdiff")), data_size,
         part->compressed_size, copts.type == OSTREE_STATIC_DELTA_COMPRESSION_ZSTD ? "zstd" : "xz",
         (g_get_monotonic_time () - start_time) / (double)G_USEC_PER_SEC);
 
@@ -1719,7 +1821,8 @@ bulk_part_parse (GVariant *part, BulkPart *out, GError **error)
   out->data_len = len - prefix_len - header_len;
 
   if (out->kind != OSTREE_STATIC_DELTA_BULK_KIND_RAW
-      && out->kind != OSTREE_STATIC_DELTA_BULK_KIND_HDIFF)
+      && out->kind != OSTREE_STATIC_DELTA_BULK_KIND_HDIFF
+      && out->kind != OSTREE_STATIC_DELTA_BULK_KIND_BSDIFF)
     return glnx_throw (error, "Unknown bulk delta part kind %u", out->kind);
   if (g_variant_get_size (out->sources) % OBJ_NAME_LEN != 0)
     return glnx_throw (error, "Invalid bulk delta part source list");
@@ -1742,7 +1845,10 @@ _ostree_static_delta_bulk_part_describe (GVariant *part, char **out_description,
       "bulk kind=%s compression=%s objects=%" G_GSIZE_FORMAT " sources=%" G_GSIZE_FORMAT
       " newsize=%" G_GUINT64_FORMAT " datasize=%" G_GUINT64_FORMAT
       " compressedsize=%" G_GSIZE_FORMAT,
-      parsed.kind == OSTREE_STATIC_DELTA_BULK_KIND_HDIFF ? "hdiff" : "raw", comp,
+      parsed.kind == OSTREE_STATIC_DELTA_BULK_KIND_HDIFF
+          ? "hdiff"
+          : (parsed.kind == OSTREE_STATIC_DELTA_BULK_KIND_BSDIFF ? "bsdiff" : "raw"),
+      comp,
       g_variant_n_children (parsed.entries), g_variant_get_size (parsed.sources) / OBJ_NAME_LEN,
       parsed.new_size, parsed.data_size, parsed.data_len);
   return TRUE;
@@ -1979,6 +2085,13 @@ diff_reader_read (gpointer user_data, guint64 pos, guint8 *buf, gsize len)
   self->pos += n;
   return TRUE;
 }
+
+static int
+bspatch_reader_read (const struct bspatch_stream *stream, void *buffer, int length)
+{
+  DiffReader *self = stream->opaque;
+  return diff_reader_read (self, self->pos, buffer, length) ? 0 : -1;
+}
 #endif /* HAVE_HDIFFPATCH */
 
 gboolean
@@ -2088,6 +2201,30 @@ _ostree_static_delta_bulk_part_execute (OstreeRepo *repo, GVariant *objects, GVa
             return glnx_throw (error, "Invalid delta source object type %u", name[0]);
         }
 
+      if (parsed.kind == OSTREE_STATIC_DELTA_BULK_KIND_BSDIFF)
+        {
+          if (parsed.new_size > MAX_BSDIFF_STREAM_BYTES)
+            return glnx_throw (error, "Object stream too large for bsdiff");
+          g_autofree guint8 *old_buf = concat_read_all (old_concat, error);
+          if (!old_buf)
+            return FALSE;
+          g_autofree guint8 *new_buf = g_malloc (MAX (parsed.new_size, 1));
+          DiffReader reader = { decompressor, 0, NULL };
+          struct bspatch_stream stream = { &reader, bspatch_reader_read };
+          if (bspatch (old_buf, old_concat->size, new_buf, parsed.new_size, &stream) < 0)
+            {
+              if (reader.error != NULL)
+                g_propagate_error (error, reader.error);
+              else
+                glnx_throw (error, "bsdiff patch failed");
+              return FALSE;
+            }
+          g_clear_pointer (&old_buf, g_free);
+          if (!stream_sink_write_inner (&sink, new_buf, parsed.new_size, error))
+            return FALSE;
+          goto out_finish;
+        }
+
       DiffReader reader = { decompressor, 0, NULL };
       const OtHdiffInput old_in = concat_as_input (old_concat);
       const OtHdiffInput diff_in = { parsed.data_size, diff_reader_read, &reader };
@@ -2113,6 +2250,7 @@ _ostree_static_delta_bulk_part_execute (OstreeRepo *repo, GVariant *objects, GVa
 #endif
     }
 
+out_finish:
   /* Finish the last object, and any trailing empty ones */
   if (!stream_sink_advance (&sink, error))
     return FALSE;
