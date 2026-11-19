@@ -1035,10 +1035,28 @@ generator_emit_part (BulkGenerator *self, const char *name, guint part_index, GA
       const OtHdiffInput old_in = concat_as_input (old_concat);
       const OtHdiffInput new_in = concat_as_input (new_concat);
       gboolean ok;
+      /* TEMPORARY experiment knobs for the precise differ */
+      const char *knob;
+      if ((knob = g_getenv ("OSTREE_BENCH_PRECISE")) != NULL && atoi (knob) == 0)
+        precise = FALSE;
       if (precise && old_concat->size + new_concat->size <= MAX_MEM_DIFF_BYTES)
         {
           OtHdiffMemOptions opts = OT_HDIFF_MEM_OPTIONS_DEFAULT;
           opts.threads = MIN (self->threads, 4);
+          if ((knob = g_getenv ("OSTREE_BENCH_PRECISE_THREADS")) != NULL)
+            opts.threads = MAX (1, atoi (knob));
+          if ((knob = g_getenv ("OSTREE_BENCH_PRECISE_MIB_PER_THREAD")) != NULL)
+            {
+              const guint64 per = (guint64)MAX (1, atoi (knob)) << 20;
+              const guint64 want = (old_concat->size + new_concat->size) / per;
+              opts.threads = (guint)CLAMP (want, MIN (self->threads, 4), self->threads);
+            }
+          if ((knob = g_getenv ("OSTREE_BENCH_PRECISE_BLOCK")) != NULL)
+            opts.fast_match_block = atoi (knob);
+          if ((knob = g_getenv ("OSTREE_BENCH_PRECISE_SCORE")) != NULL)
+            opts.match_score = atoi (knob);
+          if ((knob = g_getenv ("OSTREE_BENCH_PRECISE_BIGCACHE")) != NULL)
+            opts.big_cache = atoi (knob) != 0;
           ok = _ostree_hdiff_create_block (&old_in, &new_in, &opts, &mem_diff, error);
           if (ok)
             data_size = g_bytes_get_size (mem_diff);
@@ -1546,6 +1564,10 @@ _ostree_static_delta_bulk_generate (OstreeRepo *repo, const char *from, const ch
         target = add_old;
       if (target == NULL)
         continue;
+      /* TEMPORARY experiment: list what each part diffs against */
+      if (g_getenv ("OSTREE_BENCH_DEBUG_SOURCES"))
+        g_printerr ("source %s %s %s\n", target == mod_old ? "mod" : "new", gone ? "gone" : "kept",
+                    (const char *)value);
       if (gone_obj != NULL)
         {
           g_array_append_vals (target, gone_obj, 1);

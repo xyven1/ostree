@@ -182,6 +182,9 @@ throw_patch_failed (PatchListener *listener, GError **error)
 
 } /* namespace */
 
+extern __thread size_t _ostree_hdiff_min_work;
+extern __thread size_t _ostree_hdiff_bloom_threads;
+
 gboolean
 _ostree_hdiff_create_block (const OtHdiffInput *old_in, const OtHdiffInput *new_in,
                             const OtHdiffMemOptions *options, GBytes **out_diff, GError **error)
@@ -200,11 +203,24 @@ _ostree_hdiff_create_block (const OtHdiffInput *old_in, const OtHdiffInput *new_
       const size_t threads = MAX (options->threads, 1);
       hdiff_private::TVectorAsStreamOutput out_stream (diff);
       /* Our inputs are not safe for concurrent use; HDiffPatch then locks */
-      const hdiff_TMTSets_s mtsets = { threads, threads, false, false };
+      /* TEMPORARY experiment: OSTREE_BENCH_PRECISE_SEARCH_THREADS for the block pre-match */
+      const char *search_threads = g_getenv ("OSTREE_BENCH_PRECISE_SEARCH_THREADS");
+      /* TEMPORARY experiment: OSTREE_BENCH_MTSAFE=1 skips HDiffPatch's read lock (ours locks) */
+      const bool mt_safe = g_getenv ("OSTREE_BENCH_MTSAFE") != NULL;
+      const hdiff_TMTSets_s mtsets
+          = { threads, search_threads ? (size_t)MAX (atoi (search_threads), 1) : threads, mt_safe,
+              mt_safe };
       const size_t block = MAX (options->fast_match_block, kMatchBlockSize_min);
+      /* TEMPORARY experiment: OSTREE_BENCH_HDIFF_MIN_WORK fixes the work split */
+      const char *min_work = g_getenv ("OSTREE_BENCH_HDIFF_MIN_WORK");
+      _ostree_hdiff_min_work = min_work ? (size_t)atoi (min_work) : 0;
+      const char *bloom_threads = g_getenv ("OSTREE_BENCH_HDIFF_BLOOM_THREADS");
+      _ostree_hdiff_bloom_threads = bloom_threads ? (size_t)atoi (bloom_threads) : 0;
       create_single_compressed_diff_block (&new_stream, &old_stream, &out_stream, NULL,
                                            OT_HDIFF_STEP_MEM, block, options->match_score,
                                            options->big_cache, &mtsets);
+      _ostree_hdiff_min_work = 0;
+      _ostree_hdiff_bloom_threads = 0;
       *out_diff = g_bytes_new (diff.data (), diff.size ());
     }
   catch (const std::exception &e)
