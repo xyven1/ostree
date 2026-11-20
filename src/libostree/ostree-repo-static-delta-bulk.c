@@ -539,6 +539,45 @@ walk_commit (OstreeRepo *repo, const char *commit_checksum, CommitContents *out,
   return walk_dirtree (repo, checksum, path, out, cancellable, error);
 }
 
+/* The "tree blob" of @commit, which a bulk part can diff against instead of
+ * listing its sources: every regular file of the commit that a client can
+ * read back (non-empty, and world readable unless @private_sources), once per
+ * content object at its first path, in stream_object_compare() order.  The
+ * generator and the applier both build it with this function.  The objects'
+ * paths belong to @contents, which must outlive them.
+ */
+static gboolean
+collect_tree_sources (OstreeRepo *repo, const char *commit, gboolean private_sources,
+                      CommitContents *contents, GArray *out_objects, GCancellable *cancellable,
+                      GError **error)
+{
+  if (!walk_commit (repo, commit, contents, cancellable, error))
+    return FALSE;
+  GHashTableIter iter;
+  gpointer key, value;
+  g_hash_table_iter_init (&iter, contents->files);
+  while (g_hash_table_iter_next (&iter, &key, &value))
+    {
+      g_autoptr (GFileInfo) finfo = NULL;
+      if (!ostree_repo_load_file (repo, key, NULL, &finfo, NULL, cancellable, error))
+        return FALSE;
+      const guint32 mode = g_file_info_get_attribute_uint32 (finfo, "unix::mode");
+      if (!(S_ISREG (mode) && g_file_info_get_size (finfo) > 0
+            && (private_sources || (mode & S_IROTH))))
+        continue;
+      StreamObject obj = {
+        0,
+      };
+      obj.objtype = OSTREE_OBJECT_TYPE_FILE;
+      memcpy (obj.checksum, key, OSTREE_SHA256_STRING_LEN + 1);
+      obj.path = value;
+      obj.size = g_file_info_get_size (finfo);
+      g_array_append_val (out_objects, obj);
+    }
+  g_array_sort (out_objects, stream_object_compare);
+  return TRUE;
+}
+
 static const char *
 path_basename (const char *path)
 {
@@ -1001,13 +1040,170 @@ maybe_swap_u64 (gboolean swap, guint64 v)
   return g_variant_new_uint64 (swap ? GUINT64_SWAP_LE_BE (v) : v);
 }
 
+/* TEMPORARY experiment: smart best-of (OSTREE_BENCH_SMART=1) and tree sources */
+
+/* The precise differ is tried as an alternative only for groups up to this size */
+#define SMART_PRECISE_MAX_BYTES (G_GUINT64_CONSTANT (1) << 30)
+
+static gboolean
+count_writer_write (gpointer user_data, const guint8 *buf, gsize len, GError **error)
+{
+  *(guint64 *)user_data += len;
+  return TRUE;
+}
+
+/* The xz branch filter worth trying for @objects: the architecture of most of
+ * their ELF bytes (1 x86, 2 arm64), or 0 if ELF files are under a tenth of them.
+ */
+static int
+sniff_bcj (BulkGenerator *self, GArray *objects, GCancellable *cancellable)
+{
+  guint64 total = 0, x86 = 0, arm64 = 0;
+  for (guint i = 0; i < objects->len; i++)
+    {
+      StreamObject *obj = &g_array_index (objects, StreamObject, i);
+      total += obj->size;
+      if (obj->mem != NULL || obj->objtype != OSTREE_OBJECT_TYPE_FILE || obj->size < 20)
+        continue;
+      g_autoptr (GInputStream) in = NULL;
+      if (!ostree_repo_load_file (self->repo, obj->checksum, &in, NULL, NULL, cancellable, NULL)
+          || in == NULL)
+        continue;
+      guint8 hdr[20];
+      gsize n = 0;
+      if (!g_input_stream_read_all (in, hdr, sizeof (hdr), &n, cancellable, NULL) || n < sizeof (hdr)
+          || memcmp (hdr, "\177ELF", 4) != 0 || hdr[5] != 1 /* little endian */)
+        continue;
+      const guint16 machine = hdr[18] | (hdr[19] << 8);
+      if (machine == 62 /* x86-64 */ || machine == 3 /* i386 */)
+        x86 += obj->size;
+      else if (machine == 183 /* aarch64 */)
+        arm64 += obj->size;
+    }
+  if (MAX (x86, arm64) * 10 < total)
+    return 0;
+  return x86 >= arm64 ? 1 : 2;
+}
+
+/* Diff @new_concat against @old_concat into *out_mem (precise) or *out_tmpf (block) */
+static gboolean
+generator_diff (BulkGenerator *self, Concat *old_concat, Concat *new_concat, gboolean precise,
+                GBytes **out_mem, GLnxTmpfile *out_tmpf, guint64 *out_size, GError **error)
+{
+#ifdef HAVE_HDIFFPATCH
+  const OtHdiffInput old_in = concat_as_input (old_concat);
+  const OtHdiffInput new_in = concat_as_input (new_concat);
+  gboolean ok;
+  /* TEMPORARY experiment knobs for the precise differ */
+  const char *knob;
+  if ((knob = g_getenv ("OSTREE_BENCH_PRECISE")) != NULL && atoi (knob) == 0)
+    precise = FALSE;
+  if (precise && old_concat->size + new_concat->size <= MAX_MEM_DIFF_BYTES)
+    {
+      OtHdiffMemOptions opts = OT_HDIFF_MEM_OPTIONS_DEFAULT;
+      opts.threads = MIN (self->threads, 4);
+      if ((knob = g_getenv ("OSTREE_BENCH_PRECISE_THREADS")) != NULL)
+        opts.threads = MAX (1, atoi (knob));
+      if ((knob = g_getenv ("OSTREE_BENCH_PRECISE_MIB_PER_THREAD")) != NULL)
+        {
+          const guint64 per = (guint64)MAX (1, atoi (knob)) << 20;
+          const guint64 want = (old_concat->size + new_concat->size) / per;
+          opts.threads = (guint)CLAMP (want, MIN (self->threads, 4), self->threads);
+        }
+      if ((knob = g_getenv ("OSTREE_BENCH_PRECISE_BLOCK")) != NULL)
+        opts.fast_match_block = atoi (knob);
+      if ((knob = g_getenv ("OSTREE_BENCH_PRECISE_SCORE")) != NULL)
+        opts.match_score = atoi (knob);
+      if ((knob = g_getenv ("OSTREE_BENCH_PRECISE_BIGCACHE")) != NULL)
+        opts.big_cache = atoi (knob) != 0;
+      ok = _ostree_hdiff_create_block (&old_in, &new_in, &opts, out_mem, error);
+      if (ok)
+        *out_size = g_bytes_get_size (*out_mem);
+    }
+  else
+    {
+      if (!glnx_open_tmpfile_linkable_at (self->parts_dfd, ".", O_RDWR | O_CLOEXEC, out_tmpf, error))
+        return FALSE;
+      ok = _ostree_hdiff_create_stream (&old_in, &new_in, out_tmpf->fd, self->effort->stream_block,
+                                        self->threads, out_size, error);
+    }
+  if (!ok)
+    {
+      concat_propagate_error (old_concat, error);
+      concat_propagate_error (new_concat, error);
+      return FALSE;
+    }
+  return TRUE;
+#else
+  g_assert_not_reached ();
+#endif
+}
+
+typedef struct
+{
+  gboolean tree;
+  gboolean precise;
+  GBytes *mem;
+  GLnxTmpfile tmpf;
+  guint64 size;
+} DiffCandidate;
+
+static void
+diff_candidate_clear (DiffCandidate *self)
+{
+  g_clear_pointer (&self->mem, g_bytes_unref);
+  glnx_tmpfile_clear (&self->tmpf);
+}
+
+/* Size of @cand (or of @raw, when not diffing) compressed by a fast setting of
+ * the effort's codec, with xz branch filter @bcj
+ */
+static gboolean
+estimate_compressed (BulkGenerator *self, DiffCandidate *cand, Concat *raw, int bcj,
+                     guint64 *out_size, GCancellable *cancellable, GError **error)
+{
+  OtDeltaCompressOptions o = {
+    0,
+  };
+  o.type = self->effort->compression;
+  o.level = o.type == OSTREE_STATIC_DELTA_COMPRESSION_ZSTD ? 3 : 2;
+  o.threads = self->threads;
+  guint64 n = 0;
+  gboolean ok;
+  _ostree_bench_xz_bcj = bcj;
+  if (raw != NULL)
+    {
+      ConcatCursor cursor = { raw, 0 };
+      ok = _ostree_delta_compress (&o, concat_cursor_read, &cursor, count_writer_write, &n,
+                                   cancellable, error);
+    }
+  else if (cand->mem != NULL)
+    {
+      MemReader reader = { g_bytes_get_data (cand->mem, NULL), g_bytes_get_size (cand->mem), 0 };
+      ok = _ostree_delta_compress (&o, mem_reader_read, &reader, count_writer_write, &n,
+                                   cancellable, error);
+    }
+  else if (lseek (cand->tmpf.fd, 0, SEEK_SET) < 0)
+    ok = glnx_throw_errno_prefix (error, "lseek");
+  else
+    {
+      FdReader reader = { cand->tmpf.fd };
+      ok = _ostree_delta_compress (&o, fd_reader_read, &reader, count_writer_write, &n,
+                                   cancellable, error);
+    }
+  _ostree_bench_xz_bcj = -1;
+  *out_size = n;
+  return ok;
+}
+
 /* Emit one part producing @new_objects, optionally from @old_objects.
  * @precise selects the in-memory differ.
  */
 static gboolean
 generator_emit_part (BulkGenerator *self, const char *name, guint part_index, GArray *new_objects,
                      GArray *old_objects, gboolean precise, VariantTable *modes,
-                     VariantTable *xattrs, GCancellable *cancellable, GError **error)
+                     VariantTable *xattrs, GArray *tree_objects, const char *tree_commit,
+                     GCancellable *cancellable, GError **error)
 {
   OstreeStaticDeltaBulkPart *part = self->out_parts->pdata[part_index];
 
@@ -1020,65 +1216,105 @@ generator_emit_part (BulkGenerator *self, const char *name, guint part_index, GA
   if (!generator_build_concat (self, old_objects, &old_concat, cancellable, error))
     return FALSE;
 
-  const gboolean use_diff = old_concat->size > 0 && new_concat->size > 0;
+  g_autoptr (Concat) tree_concat = NULL;
+  if (tree_objects != NULL
+      && !generator_build_concat (self, tree_objects, &tree_concat, cancellable, error))
+    return FALSE;
+  /* Smart best-of picks between listed and tree sources; otherwise the tree
+   * sources, when given, replace the listed ones.
+   */
+  const gboolean smart = g_getenv ("OSTREE_BENCH_SMART") != NULL;
+  gboolean use_tree = tree_concat != NULL && !smart;
+  const gboolean has_listed = old_concat->size > 0 && !use_tree;
+  const gboolean has_tree = tree_concat != NULL && tree_concat->size > 0;
+  const gboolean use_diff = new_concat->size > 0 && (has_listed || (has_tree && (use_tree || smart)));
+  int bcj = -1; /* -1: the branch filter from the environment */
   g_autoptr (GBytes) mem_diff = NULL;
   g_auto (GLnxTmpfile) diff_tmpf = {
     0,
   };
   guint64 data_size;
+  const gboolean xz = self->effort->compression == OSTREE_STATIC_DELTA_COMPRESSION_XZ;
 
   if (!use_diff)
-    data_size = new_concat->size;
+    {
+      data_size = new_concat->size;
+      const int arch = smart && xz ? sniff_bcj (self, new_objects, cancellable) : 0;
+      if (arch > 0)
+        {
+          guint64 plain, filtered;
+          if (!estimate_compressed (self, NULL, new_concat, 0, &plain, cancellable, error)
+              || !estimate_compressed (self, NULL, new_concat, arch, &filtered, cancellable, error))
+            return FALSE;
+          bcj = filtered < plain ? arch : 0;
+        }
+      else if (smart)
+        bcj = 0;
+    }
+  else if (!smart)
+    {
+      if (!generator_diff (self, use_tree ? tree_concat : old_concat, new_concat, precise, &mem_diff,
+                           &diff_tmpf, &data_size, error))
+        return FALSE;
+    }
   else
     {
-#ifdef HAVE_HDIFFPATCH
-      const OtHdiffInput old_in = concat_as_input (old_concat);
-      const OtHdiffInput new_in = concat_as_input (new_concat);
-      gboolean ok;
-      /* TEMPORARY experiment knobs for the precise differ */
-      const char *knob;
-      if ((knob = g_getenv ("OSTREE_BENCH_PRECISE")) != NULL && atoi (knob) == 0)
-        precise = FALSE;
-      if (precise && old_concat->size + new_concat->size <= MAX_MEM_DIFF_BYTES)
+      DiffCandidate cands[4];
+      memset (cands, 0, sizeof (cands));
+      guint n_cands = 0;
+      gboolean ok = TRUE;
+      for (int t = 0; t < 2 && ok; t++)
         {
-          OtHdiffMemOptions opts = OT_HDIFF_MEM_OPTIONS_DEFAULT;
-          opts.threads = MIN (self->threads, 4);
-          if ((knob = g_getenv ("OSTREE_BENCH_PRECISE_THREADS")) != NULL)
-            opts.threads = MAX (1, atoi (knob));
-          if ((knob = g_getenv ("OSTREE_BENCH_PRECISE_MIB_PER_THREAD")) != NULL)
+          Concat *src = t ? tree_concat : old_concat;
+          if (src == NULL || src->size == 0)
+            continue;
+          for (int d = 0; d < 2 && ok; d++)
             {
-              const guint64 per = (guint64)MAX (1, atoi (knob)) << 20;
-              const guint64 want = (old_concat->size + new_concat->size) / per;
-              opts.threads = (guint)CLAMP (want, MIN (self->threads, 4), self->threads);
+              if (d == 1 && (precise || src->size + new_concat->size > SMART_PRECISE_MAX_BYTES))
+                continue;
+              DiffCandidate *c = &cands[n_cands++];
+              c->tree = t;
+              c->precise = d == 0 ? precise : !precise;
+              ok = generator_diff (self, src, new_concat, c->precise, &c->mem, &c->tmpf, &c->size,
+                                   error);
             }
-          if ((knob = g_getenv ("OSTREE_BENCH_PRECISE_BLOCK")) != NULL)
-            opts.fast_match_block = atoi (knob);
-          if ((knob = g_getenv ("OSTREE_BENCH_PRECISE_SCORE")) != NULL)
-            opts.match_score = atoi (knob);
-          if ((knob = g_getenv ("OSTREE_BENCH_PRECISE_BIGCACHE")) != NULL)
-            opts.big_cache = atoi (knob) != 0;
-          ok = _ostree_hdiff_create_block (&old_in, &new_in, &opts, &mem_diff, error);
-          if (ok)
-            data_size = g_bytes_get_size (mem_diff);
         }
-      else
+      const int arch = ok && xz ? sniff_bcj (self, new_objects, cancellable) : 0;
+      guint best = 0;
+      int best_bcj = 0;
+      guint64 best_est = G_MAXUINT64;
+      for (guint i = 0; i < n_cands && ok; i++)
+        for (int b = 0; b <= (arch > 0 ? 1 : 0) && ok; b++)
+          {
+            guint64 est;
+            ok = estimate_compressed (self, &cands[i], NULL, b ? arch : 0, &est, cancellable, error);
+            if (ok && est < best_est)
+              {
+                best_est = est;
+                best = i;
+                best_bcj = b ? arch : 0;
+              }
+          }
+      if (ok)
         {
-          if (!glnx_open_tmpfile_linkable_at (self->parts_dfd, ".", O_RDWR | O_CLOEXEC, &diff_tmpf,
-                                              error))
-            return FALSE;
-          ok = _ostree_hdiff_create_stream (&old_in, &new_in, diff_tmpf.fd,
-                                            self->effort->stream_block, self->threads, &data_size,
-                                            error);
+          use_tree = cands[best].tree;
+          precise = cands[best].precise;
+          mem_diff = g_steal_pointer (&cands[best].mem);
+          diff_tmpf = cands[best].tmpf;
+          cands[best].tmpf.initialized = FALSE;
+          data_size = cands[best].size;
+          bcj = best_bcj;
+          if (self->options->verbose)
+            g_printerr ("bulk part %u (%s): smart: %u candidates, chose %s sources, %s differ, "
+                        "bcj=%s (estimate %" G_GUINT64_FORMAT ")\n",
+                        part_index + 1, name, n_cands, use_tree ? "tree" : "listed",
+                        precise ? "precise" : "block",
+                        bcj == 0 ? "none" : bcj == 1 ? "x86" : "arm64", best_est);
         }
+      for (guint i = 0; i < n_cands; i++)
+        diff_candidate_clear (&cands[i]);
       if (!ok)
-        {
-          concat_propagate_error (old_concat, error);
-          concat_propagate_error (new_concat, error);
-          return FALSE;
-        }
-#else
-      g_assert_not_reached ();
-#endif
+        return FALSE;
     }
 
   /* Pick the compressor: small diffs always get the strongest setting of
@@ -1105,7 +1341,13 @@ generator_emit_part (BulkGenerator *self, const char *name, guint part_index, GA
 
   /* The header */
   g_autoptr (GByteArray) sources = g_byte_array_new ();
-  if (use_diff)
+  if (use_diff && use_tree)
+    {
+      guint8 commit_bytes[OSTREE_SHA256_DIGEST_LEN];
+      ostree_checksum_inplace_to_bytes (tree_commit, commit_bytes);
+      g_byte_array_append (sources, commit_bytes, sizeof (commit_bytes));
+    }
+  else if (use_diff)
     for (guint i = 0; i < old_objects->len; i++)
       {
         StreamObject *obj = &g_array_index (old_objects, StreamObject, i);
@@ -1140,7 +1382,10 @@ generator_emit_part (BulkGenerator *self, const char *name, guint part_index, GA
 
   g_autoptr (GVariant) header = g_variant_ref_sink (g_variant_new (
       "(yytt@ay@a(uuu)@aa(ayay)@a(uut))", copts.type,
-      (guint8)(use_diff ? OSTREE_STATIC_DELTA_BULK_KIND_HDIFF : OSTREE_STATIC_DELTA_BULK_KIND_RAW),
+      (guint8)(!use_diff  ? OSTREE_STATIC_DELTA_BULK_KIND_RAW
+               : !use_tree ? OSTREE_STATIC_DELTA_BULK_KIND_HDIFF
+               : self->options->private_sources ? OSTREE_STATIC_DELTA_BULK_KIND_HDIFF_TREE_PRIVATE
+                                                : OSTREE_STATIC_DELTA_BULK_KIND_HDIFF_TREE),
       GUINT64_TO_LE (new_concat->size), GUINT64_TO_LE (data_size),
       ot_gvariant_new_bytearray (sources->data, sources->len),
       g_variant_builder_end (&modes_builder), g_variant_builder_end (&xattrs_builder),
@@ -1199,6 +1444,8 @@ generator_emit_part (BulkGenerator *self, const char *name, guint part_index, GA
     }
 
   gboolean ok;
+  if (bcj >= 0)
+    _ostree_bench_xz_bcj = bcj;
   if (!use_diff)
     {
       ConcatCursor cursor = { new_concat, 0 };
@@ -1228,6 +1475,7 @@ generator_emit_part (BulkGenerator *self, const char *name, guint part_index, GA
       ok = _ostree_delta_compress (&copts, fd_reader_read, &reader, out_write, out_data,
                                    cancellable, error);
     }
+  _ostree_bench_xz_bcj = -1;
   if (pipelined)
     ok = async_sink_finish (&sink, ok, error);
   if (!ok)
@@ -1250,8 +1498,11 @@ generator_emit_part (BulkGenerator *self, const char *name, guint part_index, GA
     g_printerr (
         "bulk part %u (%s): objects=%u sources=%u new=%" G_GUINT64_FORMAT " old=%" G_GUINT64_FORMAT
         " %s=%" G_GUINT64_FORMAT " compressed=%" G_GUINT64_FORMAT " (%s) in %.2fs\n",
-        part_index + 1, name, new_objects->len, use_diff ? old_objects->len : 0, new_concat->size,
-        old_concat->size, !use_diff ? "raw" : (mem_diff ? "diff" : "blockdiff"), data_size,
+        part_index + 1, name, new_objects->len,
+        !use_diff ? 0 : (use_tree ? tree_objects->len : old_objects->len), new_concat->size,
+        use_tree ? tree_concat->size : old_concat->size,
+        !use_diff ? "raw" : (mem_diff ? (use_tree ? "treediff" : "diff") : (use_tree ? "treeblockdiff" : "blockdiff")),
+        data_size,
         part->compressed_size, copts.type == OSTREE_STATIC_DELTA_COMPRESSION_ZSTD ? "zstd" : "xz",
         (g_get_monotonic_time () - start_time) / (double)G_USEC_PER_SEC);
 
@@ -1348,6 +1599,8 @@ typedef struct
   VariantTable *xattrs;
   GCancellable *cancellable;
   GError *error;
+  GArray *tree_objects;    /* the from-commit's tree blob, or NULL */
+  const char *tree_commit; /* ...and that commit */
 } EmitJob;
 
 static gpointer
@@ -1357,8 +1610,8 @@ emit_job_thread (gpointer data)
   if (!g_getenv ("OSTREE_BENCH_BEST_OF"))
     return GINT_TO_POINTER (generator_emit_part (job->gen, job->name, job->part_index,
                                                  job->new_objects, job->old_objects, job->precise,
-                                                 job->modes, job->xattrs, job->cancellable,
-                                                 &job->error));
+                                                 job->modes, job->xattrs, job->tree_objects,
+                                                 job->tree_commit, job->cancellable, &job->error));
 
   /* TEMPORARY experiment: OSTREE_BENCH_BEST_OF=1 encodes the part with each differ (both only for a
    * part that is not already precise) and each xz branch filter, and keeps the smallest.
@@ -1379,7 +1632,8 @@ emit_job_thread (gpointer data)
         _ostree_bench_xz_bcj = bcj;
         const gboolean ok = generator_emit_part (job->gen, job->name, job->part_index,
                                                  job->new_objects, job->old_objects, precise,
-                                                 job->modes, job->xattrs, job->cancellable, &job->error);
+                                                 job->modes, job->xattrs, job->tree_objects,
+                                                 job->tree_commit, job->cancellable, &job->error);
         _ostree_bench_xz_bcj = -1;
         if (!ok)
           {
@@ -1474,6 +1728,13 @@ _ostree_static_delta_bulk_generate (OstreeRepo *repo, const char *from, const ch
   /* "new" part */
   g_autoptr (GArray) add_new = stream_object_array_new ();
   g_autoptr (GArray) add_old = stream_object_array_new ();
+  /* TEMPORARY experiment: the from-commit's tree blob as the new part's sources
+   * (OSTREE_BENCH_TREE_SOURCES=1); see collect_tree_sources()
+   */
+  g_auto (CommitContents) tree_contents = {
+    0,
+  };
+  g_autoptr (GArray) tree_old = NULL;
 
   g_autoptr (GStringChunk) names = g_string_chunk_new (4096);
 
@@ -1665,12 +1926,21 @@ _ostree_static_delta_bulk_generate (OstreeRepo *repo, const char *from, const ch
     /* If the groups were merged above, the first part is mostly new content,
      * which the precise differ is slow and no better at.
      */
+    if (from != NULL && g_getenv ("OSTREE_BENCH_TREE_SOURCES") != NULL)
+      {
+        commit_contents_init (&tree_contents);
+        tree_old = stream_object_array_new ();
+        if (!collect_tree_sources (repo, from, options->private_sources, &tree_contents, tree_old,
+                                   cancellable, error))
+          goto out;
+      }
     /* TEMPORARY experiment: OSTREE_BENCH_NEW_PRECISE=1 uses the precise differ for the new part */
     const gboolean new_precise = g_getenv ("OSTREE_BENCH_NEW_PRECISE") != NULL;
     EmitJob jobs[2]
         = { { &gen, merged ? "all" : "modified", 0, mod_new, mod_old, !merged || one_part, &modes,
-              &xattrs, cancellable, NULL },
-            { &gen, "new", 0, add_new, add_old, new_precise, &modes, &xattrs, cancellable, NULL } };
+              &xattrs, cancellable, NULL, merged ? tree_old : NULL, from },
+            { &gen, "new", 0, add_new, add_old, new_precise, &modes, &xattrs, cancellable, NULL,
+              tree_old, from } };
     guint n_jobs = 0;
     for (guint j = 0; j < G_N_ELEMENTS (jobs); j++)
       {
@@ -1742,6 +2012,13 @@ bulk_part_clear (BulkPart *self)
 }
 G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (BulkPart, bulk_part_clear)
 
+static gboolean
+bulk_kind_is_tree (guint8 kind)
+{
+  return kind == OSTREE_STATIC_DELTA_BULK_KIND_HDIFF_TREE
+         || kind == OSTREE_STATIC_DELTA_BULK_KIND_HDIFF_TREE_PRIVATE;
+}
+
 /* @part is the "ay" variant produced by _ostree_static_delta_part_open() */
 static gboolean
 bulk_part_parse (GVariant *part, BulkPart *out, GError **error)
@@ -1795,9 +2072,14 @@ bulk_part_parse (GVariant *part, BulkPart *out, GError **error)
   out->data_len = len - prefix_len - header_len;
 
   if (out->kind != OSTREE_STATIC_DELTA_BULK_KIND_RAW
-      && out->kind != OSTREE_STATIC_DELTA_BULK_KIND_HDIFF)
+      && out->kind != OSTREE_STATIC_DELTA_BULK_KIND_HDIFF
+      && out->kind != OSTREE_STATIC_DELTA_BULK_KIND_HDIFF_TREE
+      && out->kind != OSTREE_STATIC_DELTA_BULK_KIND_HDIFF_TREE_PRIVATE)
     return glnx_throw (error, "Unknown bulk delta part kind %u", out->kind);
-  if (g_variant_get_size (out->sources) % OBJ_NAME_LEN != 0)
+  /* A tree part names the commit whose tree blob it diffs against */
+  if (bulk_kind_is_tree (out->kind)
+          ? g_variant_get_size (out->sources) != OSTREE_SHA256_DIGEST_LEN
+          : g_variant_get_size (out->sources) % OBJ_NAME_LEN != 0)
     return glnx_throw (error, "Invalid bulk delta part source list");
   return TRUE;
 }
@@ -1818,7 +2100,10 @@ _ostree_static_delta_bulk_part_describe (GVariant *part, char **out_description,
       "bulk kind=%s compression=%s objects=%" G_GSIZE_FORMAT " sources=%" G_GSIZE_FORMAT
       " newsize=%" G_GUINT64_FORMAT " datasize=%" G_GUINT64_FORMAT
       " compressedsize=%" G_GSIZE_FORMAT,
-      parsed.kind == OSTREE_STATIC_DELTA_BULK_KIND_HDIFF ? "hdiff" : "raw", comp,
+      parsed.kind == OSTREE_STATIC_DELTA_BULK_KIND_HDIFF ? "hdiff"
+      : bulk_kind_is_tree (parsed.kind)                  ? "hdiff-tree"
+                                                         : "raw",
+      comp,
       g_variant_n_children (parsed.entries), g_variant_get_size (parsed.sources) / OBJ_NAME_LEN,
       parsed.new_size, parsed.data_size, parsed.data_len);
   return TRUE;
@@ -2136,6 +2421,27 @@ _ostree_static_delta_bulk_part_execute (OstreeRepo *repo, GVariant *objects, GVa
       g_autoptr (Concat) old_concat = concat_new (repo);
       gsize sources_len;
       const guint8 *sources = g_variant_get_fixed_array (parsed.sources, &sources_len, 1);
+      if (bulk_kind_is_tree (parsed.kind))
+        {
+          /* The tree blob of the named commit, built as the generator built it */
+          char commit[OSTREE_SHA256_STRING_LEN + 1];
+          ostree_checksum_inplace_from_bytes (sources, commit);
+          g_auto (CommitContents) contents = {
+            0,
+          };
+          commit_contents_init (&contents);
+          g_autoptr (GArray) tree_objects = stream_object_array_new ();
+          if (!collect_tree_sources (
+                  repo, commit, parsed.kind == OSTREE_STATIC_DELTA_BULK_KIND_HDIFF_TREE_PRIVATE,
+                  &contents, tree_objects, cancellable, error))
+            return glnx_prefix_error (error, "Loading delta source tree %s", commit);
+          for (guint i = 0; i < tree_objects->len; i++)
+            {
+              StreamObject *obj = &g_array_index (tree_objects, StreamObject, i);
+              concat_append_object (old_concat, obj->checksum, obj->size);
+            }
+          sources_len = 0; /* nothing listed */
+        }
       for (gsize i = 0; i < sources_len / OBJ_NAME_LEN; i++)
         {
           const guint8 *name = sources + i * OBJ_NAME_LEN;

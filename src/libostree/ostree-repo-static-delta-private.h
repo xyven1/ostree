@@ -179,6 +179,12 @@ typedef enum
 #define OSTREE_STATIC_DELTA_BULK_HEADER_FORMAT "(yyttaya(uuu)aa(ayay)a(uut))"
 #define OSTREE_STATIC_DELTA_BULK_KIND_RAW 0
 #define OSTREE_STATIC_DELTA_BULK_KIND_HDIFF 1
+/* Experiment: HDiffPatch against the "tree blob" of a commit (every usable regular file, see
+ * collect_tree_sources()) instead of listed sources; the sources field holds that commit's
+ * checksum.  _PRIVATE also counts files that are not world readable.
+ */
+#define OSTREE_STATIC_DELTA_BULK_KIND_HDIFF_TREE 3
+#define OSTREE_STATIC_DELTA_BULK_KIND_HDIFF_TREE_PRIVATE 4
 
 #define OSTREE_STATIC_DELTA_BULK_EFFORT_MAX 9
 #define OSTREE_STATIC_DELTA_BULK_EFFORT_DEFAULT 4
