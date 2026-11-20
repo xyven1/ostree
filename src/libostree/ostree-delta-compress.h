@@ -53,6 +53,9 @@ typedef gssize (*OtDeltaReadFunc) (gpointer user_data, guint8 *buf, gsize len, G
 typedef gboolean (*OtDeltaWriteFunc) (gpointer user_data, const guint8 *buf, gsize len,
                                       GError **error);
 
+/* TEMPORARY experiment: xz branch filter for the calling thread (-1: from the environment) */
+extern __thread int _ostree_bench_xz_bcj;
+
 gboolean _ostree_delta_compress (const OtDeltaCompressOptions *options, OtDeltaReadFunc read,
                                  gpointer read_data, OtDeltaWriteFunc write, gpointer write_data,
                                  GCancellable *cancellable, GError **error);

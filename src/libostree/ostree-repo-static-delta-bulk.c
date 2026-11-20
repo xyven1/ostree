@@ -1354,9 +1354,56 @@ static gpointer
 emit_job_thread (gpointer data)
 {
   EmitJob *job = data;
-  return GINT_TO_POINTER (
-      generator_emit_part (job->gen, job->name, job->part_index, job->new_objects, job->old_objects,
-                           job->precise, job->modes, job->xattrs, job->cancellable, &job->error));
+  if (!g_getenv ("OSTREE_BENCH_BEST_OF"))
+    return GINT_TO_POINTER (generator_emit_part (job->gen, job->name, job->part_index,
+                                                 job->new_objects, job->old_objects, job->precise,
+                                                 job->modes, job->xattrs, job->cancellable,
+                                                 &job->error));
+
+  /* TEMPORARY experiment: OSTREE_BENCH_BEST_OF=1 encodes the part with each differ (both only for a
+   * part that is not already precise) and each xz branch filter, and keeps the smallest.
+   */
+  OstreeStaticDeltaBulkPart **slot
+      = (OstreeStaticDeltaBulkPart **)&job->gen->out_parts->pdata[job->part_index];
+  _ostree_static_delta_bulk_part_free (*slot);
+  *slot = NULL;
+  OstreeStaticDeltaBulkPart *best = NULL;
+  int best_precise = 0, best_bcj = 0;
+  const int n_differs = job->precise ? 1 : 2;
+  const int n_bcj = job->gen->effort->compression == OSTREE_STATIC_DELTA_COMPRESSION_XZ ? 3 : 1;
+  for (int d = 0; d < n_differs; d++)
+    for (int bcj = 0; bcj < n_bcj; bcj++)
+      {
+        const gboolean precise = d == 0 ? job->precise : !job->precise;
+        *slot = g_new0 (OstreeStaticDeltaBulkPart, 1);
+        _ostree_bench_xz_bcj = bcj;
+        const gboolean ok = generator_emit_part (job->gen, job->name, job->part_index,
+                                                 job->new_objects, job->old_objects, precise,
+                                                 job->modes, job->xattrs, job->cancellable, &job->error);
+        _ostree_bench_xz_bcj = -1;
+        if (!ok)
+          {
+            _ostree_static_delta_bulk_part_free (*slot);
+            *slot = best;
+            return GINT_TO_POINTER (FALSE);
+          }
+        if (best == NULL || (*slot)->compressed_size < best->compressed_size)
+          {
+            _ostree_static_delta_bulk_part_free (best);
+            best = *slot;
+            best_precise = precise;
+            best_bcj = bcj;
+          }
+        else
+          _ostree_static_delta_bulk_part_free (*slot);
+        *slot = NULL;
+      }
+  *slot = best;
+  if (job->gen->options->verbose)
+    g_printerr ("bulk part %u (%s): best of %d: precise=%d bcj=%s compressed=%" G_GUINT64_FORMAT "\n",
+                job->part_index + 1, job->name, n_differs * n_bcj, best_precise,
+                best_bcj == 0 ? "none" : best_bcj == 1 ? "x86" : "arm64", best->compressed_size);
+  return GINT_TO_POINTER (TRUE);
 }
 
 void
@@ -1562,6 +1609,9 @@ _ostree_static_delta_bulk_generate (OstreeRepo *repo, const char *from, const ch
         target = mod_old;
       else if (add_new->len > 0 && (gone || g_hash_table_contains (add_basenames, basename)))
         target = add_old;
+      /* TEMPORARY experiment: OSTREE_BENCH_NEW_SOURCES=all offers every old file to the new part */
+      else if (add_new->len > 0 && g_strcmp0 (g_getenv ("OSTREE_BENCH_NEW_SOURCES"), "all") == 0)
+        target = add_old;
       if (target == NULL)
         continue;
       /* TEMPORARY experiment: list what each part diffs against */
@@ -1587,7 +1637,9 @@ _ostree_static_delta_bulk_generate (OstreeRepo *repo, const char *from, const ch
    * separate part: one stream compresses better.
    */
   gboolean merged = FALSE;
-  if (mod_old->len == 0)
+  /* TEMPORARY experiment: OSTREE_BENCH_ONE_PART=1 merges both groups into one precise part */
+  const gboolean one_part = g_getenv ("OSTREE_BENCH_ONE_PART") != NULL;
+  if (mod_old->len == 0 || one_part)
     {
       merged = TRUE;
       g_array_append_vals (mod_new, add_new->data, add_new->len);
@@ -1613,10 +1665,12 @@ _ostree_static_delta_bulk_generate (OstreeRepo *repo, const char *from, const ch
     /* If the groups were merged above, the first part is mostly new content,
      * which the precise differ is slow and no better at.
      */
+    /* TEMPORARY experiment: OSTREE_BENCH_NEW_PRECISE=1 uses the precise differ for the new part */
+    const gboolean new_precise = g_getenv ("OSTREE_BENCH_NEW_PRECISE") != NULL;
     EmitJob jobs[2]
-        = { { &gen, merged ? "all" : "modified", 0, mod_new, mod_old, !merged, &modes, &xattrs,
-              cancellable, NULL },
-            { &gen, "new", 0, add_new, add_old, FALSE, &modes, &xattrs, cancellable, NULL } };
+        = { { &gen, merged ? "all" : "modified", 0, mod_new, mod_old, !merged || one_part, &modes,
+              &xattrs, cancellable, NULL },
+            { &gen, "new", 0, add_new, add_old, new_precise, &modes, &xattrs, cancellable, NULL } };
     guint n_jobs = 0;
     for (guint j = 0; j < G_N_ELEMENTS (jobs); j++)
       {

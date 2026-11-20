@@ -61,13 +61,21 @@ compress_none (OtDeltaReadFunc read, gpointer read_data, OtDeltaWriteFunc write,
     }
 }
 
+/* TEMPORARY experiment: xz branch filter for this thread (-1: from the environment, 0: none,
+ * 1: x86, 2: arm64) */
+__thread int _ostree_bench_xz_bcj = -1;
+
 static gboolean
 compress_xz (const OtDeltaCompressOptions *options, OtDeltaReadFunc read, gpointer read_data,
              OtDeltaWriteFunc write, gpointer write_data, GCancellable *cancellable, GError **error)
 {
   lzma_stream strm = LZMA_STREAM_INIT;
   lzma_options_lzma lzma_opts;
-  const uint32_t preset = (uint32_t)CLAMP (options->level, 0, 9);
+  /* TEMPORARY experiment knobs: OSTREE_BENCH_XZ_EXTREME, OSTREE_BENCH_XZ_X86 (the decoder reads
+   * the filter chain from the stream, so either works with existing clients)
+   */
+  const uint32_t preset = (uint32_t)CLAMP (options->level, 0, 9)
+                          | (g_getenv ("OSTREE_BENCH_XZ_EXTREME") ? LZMA_PRESET_EXTREME : 0);
   if (lzma_lzma_preset (&lzma_opts, preset))
     return glnx_throw (error, "Invalid xz preset %d", options->level);
   if (options->window_log > 0)
@@ -84,7 +92,23 @@ compress_xz (const OtDeltaCompressOptions *options, OtDeltaReadFunc read, gpoint
     }
 
   lzma_filter filters[] = { { .id = LZMA_FILTER_LZMA2, .options = &lzma_opts },
+                            { .id = LZMA_VLI_UNKNOWN, .options = NULL },
                             { .id = LZMA_VLI_UNKNOWN, .options = NULL } };
+  /* Branch filter: the per-thread override (set by bulk best-of), else OSTREE_BENCH_XZ_BCJ=x86|arm64,
+   * else OSTREE_BENCH_XZ_X86 */
+  int bcj = _ostree_bench_xz_bcj;
+  if (bcj < 0)
+    {
+      const char *v = g_getenv ("OSTREE_BENCH_XZ_BCJ");
+      bcj = g_strcmp0 (v, "x86") == 0 ? 1 : g_strcmp0 (v, "arm64") == 0 ? 2 : 0;
+      if (g_getenv ("OSTREE_BENCH_XZ_X86"))
+        bcj = 1;
+    }
+  if (bcj > 0)
+    {
+      filters[1] = filters[0];
+      filters[0] = (lzma_filter){ .id = bcj == 1 ? LZMA_FILTER_X86 : LZMA_FILTER_ARM64, .options = NULL };
+    }
 
   lzma_ret r;
   if (options->threads > 1)
