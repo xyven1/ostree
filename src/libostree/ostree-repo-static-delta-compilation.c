@@ -1566,7 +1566,13 @@ ostree_repo_static_delta_generate (OstreeRepo *self, OstreeStaticDeltaGenerateOp
 
   /* Generate OSTREE_STATIC_DELTA_SUPERBLOCK_FORMAT */
   {
-    GDateTime *now = g_date_time_new_now_utc ();
+    /* SOURCE_DATE_EPOCH (https://reproducible-builds.org/specs/source-date-epoch/)
+     * makes the timestamp, and so the whole delta, reproducible.
+     */
+    const char *epoch = g_getenv ("SOURCE_DATE_EPOCH");
+    GDateTime *now = epoch != NULL && *epoch
+                         ? g_date_time_new_from_unix_utc ((gint64)g_ascii_strtoull (epoch, NULL, 10))
+                         : g_date_time_new_now_utc ();
     /* floating */ GVariant *from_csum_v
         = from ? ostree_checksum_to_bytes_v (from) : ot_gvariant_new_bytearray ((guchar *)"", 0);
     /* floating */ GVariant *to_csum_v = ostree_checksum_to_bytes_v (to);

@@ -1269,7 +1269,8 @@ start_deltapart_apply (OtPullData *pull_data, FetchStaticDeltaData *fetch_data)
     }
 
   pull_data->n_outstanding_deltapart_write_requests++;
-  _ostree_static_delta_part_execute_async (pull_data->repo, fetch_data->objects, part,
+  _ostree_static_delta_part_execute_async (pull_data->repo, fetch_data->from_revision,
+                                           fetch_data->objects, part,
                                            pull_data->cancellable, on_static_delta_written,
                                            fetch_data);
 }
@@ -2276,7 +2277,8 @@ process_one_static_delta (OtPullData *pull_data, const char *from_revision, cons
               return FALSE;
             }
 
-          _ostree_static_delta_part_execute_async (pull_data->repo, fetch_data->objects,
+          _ostree_static_delta_part_execute_async (pull_data->repo, fetch_data->from_revision,
+                                                   fetch_data->objects,
                                                    inline_delta_part, pull_data->cancellable,
                                                    on_static_delta_written, fetch_data);
           pull_data->n_outstanding_deltapart_write_requests++;

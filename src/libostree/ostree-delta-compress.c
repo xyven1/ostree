@@ -111,10 +111,10 @@ compress_xz (const OtDeltaCompressOptions *options, OtDeltaReadFunc read, gpoint
     }
 
   lzma_ret r;
-  if (options->threads > 1)
+  if (options->threads > 1 || options->multithreaded_format)
     {
       lzma_mt mt = {
-        .threads = options->threads,
+        .threads = MAX (options->threads, 1),
         /* 0: liblzma picks three times the dictionary size */
         .block_size = 0,
         .filters = filters,
@@ -213,8 +213,8 @@ compress_zstd (const OtDeltaCompressOptions *options, OtDeltaReadFunc read, gpoi
         }
     }
   /* Fails harmlessly if libzstd was built without threading */
-  if (options->threads > 1)
-    (void)ZSTD_CCtx_setParameter (cctx, ZSTD_c_nbWorkers, (int)options->threads);
+  if (options->threads > 1 || options->multithreaded_format)
+    (void)ZSTD_CCtx_setParameter (cctx, ZSTD_c_nbWorkers, (int)MAX (options->threads, 1));
 
   gboolean eof = FALSE;
   while (!eof)

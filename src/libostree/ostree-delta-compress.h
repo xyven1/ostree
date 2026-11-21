@@ -40,6 +40,10 @@ typedef struct
    * also splits the input into independent blocks, costing some size.
    */
   guint threads;
+  /* Use the multi-threaded encoders' format (zstd jobs, xz blocks) even with
+   * one thread, so that the output does not depend on @threads.
+   */
+  gboolean multithreaded_format;
   /* The exact number of bytes @read will supply, if known.  Lets zstd size
    * its tables to the input instead of for an input of unknown length,
    * which for small inputs at high levels is most of the cost.

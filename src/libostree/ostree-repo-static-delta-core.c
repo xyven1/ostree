@@ -682,7 +682,7 @@ ostree_repo_static_delta_execute_offline_with_signature (OstreeRepo *self, GFile
             return FALSE;
         }
 
-      if (!_ostree_static_delta_part_execute (self, objects, part, skip_validation, NULL,
+      if (!_ostree_static_delta_part_execute (self, from_checksum, objects, part, skip_validation, NULL,
                                               cancellable, error))
         return glnx_prefix_error (error, "Executing delta part %i", i);
     }
@@ -869,7 +869,8 @@ show_one_part (OstreeRepo *self, gboolean swap_endian, const char *from, const c
       if (!_ostree_static_delta_bulk_part_describe (part, &description, error))
         return FALSE;
       g_print ("PartPayload%u: %s\n", i, description);
-      if (!_ostree_static_delta_part_execute (self, objects, part, TRUE, NULL, cancellable, error))
+      if (!_ostree_static_delta_part_execute (self, from, objects, part, TRUE, NULL, cancellable,
+                                              error))
         return FALSE;
     }
   else
@@ -891,7 +892,8 @@ show_one_part (OstreeRepo *self, gboolean swap_endian, const char *from, const c
              i, (guint64)g_variant_n_children (modes), (guint64)g_variant_n_children (xattrs),
              (guint64)g_variant_n_children (blob), (guint64)g_variant_n_children (ops));
 
-    if (!_ostree_static_delta_part_execute (self, objects, part, TRUE, &stats, cancellable, error))
+    if (!_ostree_static_delta_part_execute (self, from, objects, part, TRUE, &stats, cancellable,
+                                            error))
       return FALSE;
 
     {

@@ -1124,8 +1124,12 @@ generator_diff (BulkGenerator *self, Concat *old_concat, Concat *new_concat, gbo
     {
       if (!glnx_open_tmpfile_linkable_at (self->parts_dfd, ".", O_RDWR | O_CLOEXEC, out_tmpf, error))
         return FALSE;
-      ok = _ostree_hdiff_create_stream (&old_in, &new_in, out_tmpf->fd, self->effort->stream_block,
-                                        self->threads, out_size, error);
+      /* TEMPORARY experiment: OSTREE_BENCH_STREAM_BLOCK overrides the block differ's match block */
+      const gsize stream_block = (knob = g_getenv ("OSTREE_BENCH_STREAM_BLOCK")) != NULL
+                                     ? (gsize)MAX (atoi (knob), 1)
+                                     : self->effort->stream_block;
+      ok = _ostree_hdiff_create_stream (&old_in, &new_in, out_tmpf->fd, stream_block, self->threads,
+                                        out_size, error);
     }
   if (!ok)
     {
@@ -1167,7 +1171,11 @@ estimate_compressed (BulkGenerator *self, DiffCandidate *cand, Concat *raw, int 
   };
   o.type = self->effort->compression;
   o.level = o.type == OSTREE_STATIC_DELTA_COMPRESSION_ZSTD ? 3 : 2;
+  /* The multi-threaded format, whatever the thread count, so that the choice
+   * does not depend on --threads
+   */
   o.threads = self->threads;
+  o.multithreaded_format = TRUE;
   guint64 n = 0;
   gboolean ok;
   _ostree_bench_xz_bcj = bcj;
@@ -1227,7 +1235,7 @@ generator_emit_part (BulkGenerator *self, const char *name, guint part_index, GA
   gboolean use_tree = tree_concat != NULL && !smart;
   const gboolean has_listed = old_concat->size > 0 && !use_tree;
   const gboolean has_tree = tree_concat != NULL && tree_concat->size > 0;
-  const gboolean use_diff = new_concat->size > 0 && (has_listed || (has_tree && (use_tree || smart)));
+  gboolean use_diff = new_concat->size > 0 && (has_listed || (has_tree && (use_tree || smart)));
   int bcj = -1; /* -1: the branch filter from the environment */
   g_autoptr (GBytes) mem_diff = NULL;
   g_auto (GLnxTmpfile) diff_tmpf = {
@@ -1261,6 +1269,10 @@ generator_emit_part (BulkGenerator *self, const char *name, guint part_index, GA
     {
       DiffCandidate cands[4];
       memset (cands, 0, sizeof (cands));
+      /* TEMPORARY experiment: OSTREE_BENCH_SMART_PRECISE_MAX_MB overrides the precise candidate's limit */
+      const char *pmax = g_getenv ("OSTREE_BENCH_SMART_PRECISE_MAX_MB");
+      const guint64 precise_max = pmax ? (guint64)g_ascii_strtoull (pmax, NULL, 10) << 20
+                                       : SMART_PRECISE_MAX_BYTES;
       guint n_cands = 0;
       gboolean ok = TRUE;
       for (int t = 0; t < 2 && ok; t++)
@@ -1270,7 +1282,7 @@ generator_emit_part (BulkGenerator *self, const char *name, guint part_index, GA
             continue;
           for (int d = 0; d < 2 && ok; d++)
             {
-              if (d == 1 && (precise || src->size + new_concat->size > SMART_PRECISE_MAX_BYTES))
+              if (d == 1 && (precise || src->size + new_concat->size > precise_max))
                 continue;
               DiffCandidate *c = &cands[n_cands++];
               c->tree = t;
@@ -1295,7 +1307,33 @@ generator_emit_part (BulkGenerator *self, const char *name, guint part_index, GA
                 best_bcj = b ? arch : 0;
               }
           }
-      if (ok)
+      /* Sending the new data undiffed is a candidate too: a diff against
+       * unrelated sources can come out larger.
+       */
+      gboolean raw_wins = FALSE;
+      for (int b = 0; b <= (arch > 0 ? 1 : 0) && ok; b++)
+        {
+          guint64 est;
+          ok = estimate_compressed (self, NULL, new_concat, b ? arch : 0, &est, cancellable, error);
+          if (ok && est < best_est)
+            {
+              best_est = est;
+              best_bcj = b ? arch : 0;
+              raw_wins = TRUE;
+            }
+        }
+      if (ok && raw_wins)
+        {
+          use_diff = FALSE;
+          use_tree = FALSE;
+          data_size = new_concat->size;
+          bcj = best_bcj;
+          if (self->options->verbose)
+            g_printerr ("bulk part %u (%s): smart: %u candidates, chose raw, bcj=%s (estimate %" G_GUINT64_FORMAT ")\n",
+                        part_index + 1, name, n_cands,
+                        bcj == 0 ? "none" : bcj == 1 ? "x86" : "arm64", best_est);
+        }
+      else if (ok)
         {
           use_tree = cands[best].tree;
           precise = cands[best].precise;
@@ -1327,9 +1365,14 @@ generator_emit_part (BulkGenerator *self, const char *name, guint part_index, GA
   copts.level = self->effort->level;
   copts.window_log = self->effort->window_log;
   copts.threads = self->effort->single_block ? 1 : self->threads;
+  /* The format is chosen by the effort and the data, never by --threads, so
+   * that the same delta comes out whatever the thread count.
+   */
+  copts.multithreaded_format = !self->effort->single_block;
   if (data_size <= SMALL_DIFF_BYTES)
     {
       copts.threads = 1;
+      copts.multithreaded_format = FALSE;
       if (copts.type == OSTREE_STATIC_DELTA_COMPRESSION_ZSTD)
         copts.level = MAX (copts.level, 19);
       else
@@ -1341,13 +1384,10 @@ generator_emit_part (BulkGenerator *self, const char *name, guint part_index, GA
 
   /* The header */
   g_autoptr (GByteArray) sources = g_byte_array_new ();
-  if (use_diff && use_tree)
-    {
-      guint8 commit_bytes[OSTREE_SHA256_DIGEST_LEN];
-      ostree_checksum_inplace_to_bytes (tree_commit, commit_bytes);
-      g_byte_array_append (sources, commit_bytes, sizeof (commit_bytes));
-    }
-  else if (use_diff)
+  /* A tree part lists nothing: its sources are the tree of the delta's
+   * from-commit, which the superblock names.
+   */
+  if (use_diff && !use_tree)
     for (guint i = 0; i < old_objects->len; i++)
       {
         StreamObject *obj = &g_array_index (old_objects, StreamObject, i);
@@ -2078,7 +2118,8 @@ bulk_part_parse (GVariant *part, BulkPart *out, GError **error)
     return glnx_throw (error, "Unknown bulk delta part kind %u", out->kind);
   /* A tree part names the commit whose tree blob it diffs against */
   if (bulk_kind_is_tree (out->kind)
-          ? g_variant_get_size (out->sources) != OSTREE_SHA256_DIGEST_LEN
+          ? (g_variant_get_size (out->sources) != 0
+             && g_variant_get_size (out->sources) != OSTREE_SHA256_DIGEST_LEN)
           : g_variant_get_size (out->sources) % OBJ_NAME_LEN != 0)
     return glnx_throw (error, "Invalid bulk delta part source list");
   return TRUE;
@@ -2343,7 +2384,8 @@ diff_reader_read (gpointer user_data, guint64 pos, guint8 *buf, gsize len)
 #endif /* HAVE_HDIFFPATCH */
 
 gboolean
-_ostree_static_delta_bulk_part_execute (OstreeRepo *repo, GVariant *objects, GVariant *part,
+_ostree_static_delta_bulk_part_execute (OstreeRepo *repo, const char *from, GVariant *objects,
+                                        GVariant *part,
                                         gboolean stats_only, GCancellable *cancellable,
                                         GError **error)
 {
@@ -2423,9 +2465,16 @@ _ostree_static_delta_bulk_part_execute (OstreeRepo *repo, GVariant *objects, GVa
       const guint8 *sources = g_variant_get_fixed_array (parsed.sources, &sources_len, 1);
       if (bulk_kind_is_tree (parsed.kind))
         {
-          /* The tree blob of the named commit, built as the generator built it */
+          /* The tree blob of the delta's from-commit (or, in early experimental
+           * deltas, of the commit the part names), built as the generator built it
+           */
           char commit[OSTREE_SHA256_STRING_LEN + 1];
-          ostree_checksum_inplace_from_bytes (sources, commit);
+          if (sources_len == OSTREE_SHA256_DIGEST_LEN)
+            ostree_checksum_inplace_from_bytes (sources, commit);
+          else if (from != NULL)
+            memcpy (commit, from, sizeof (commit));
+          else
+            return glnx_throw (error, "Bulk delta tree part in a delta without a from-commit");
           g_auto (CommitContents) contents = {
             0,
           };

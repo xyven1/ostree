@@ -162,7 +162,8 @@ delta_opcode_index (OstreeStaticDeltaOpCode op)
 }
 
 gboolean
-_ostree_static_delta_part_execute (OstreeRepo *repo, GVariant *objects, GVariant *part,
+_ostree_static_delta_part_execute (OstreeRepo *repo, const char *from, GVariant *objects,
+                                   GVariant *part,
                                    gboolean stats_only, OstreeDeltaExecuteStats *stats,
                                    GCancellable *cancellable, GError **error)
 {
@@ -180,7 +181,7 @@ _ostree_static_delta_part_execute (OstreeRepo *repo, GVariant *objects, GVariant
 
   /* Bulk parts have their own format and executor */
   if (g_variant_is_of_type (part, G_VARIANT_TYPE ("ay")))
-    return _ostree_static_delta_bulk_part_execute (repo, objects, part, stats_only, cancellable,
+    return _ostree_static_delta_bulk_part_execute (repo, from, objects, part, stats_only, cancellable,
                                                      error);
 
   static_delta_execution_state_init (&statedata);
@@ -277,6 +278,7 @@ out:
 typedef struct
 {
   OstreeRepo *repo;
+  char *from;
   GVariant *header;
   GVariant *part;
   GCancellable *cancellable;
@@ -288,6 +290,7 @@ static_delta_part_execute_async_data_free (gpointer user_data)
   StaticDeltaPartExecuteAsyncData *data = user_data;
 
   g_clear_object (&data->repo);
+  g_free (data->from);
   g_variant_unref (data->header);
   g_variant_unref (data->part);
   g_clear_object (&data->cancellable);
@@ -301,15 +304,16 @@ static_delta_part_execute_thread (GTask *task, GObject *object, gpointer datap,
   GError *error = NULL;
   StaticDeltaPartExecuteAsyncData *data = datap;
 
-  if (!_ostree_static_delta_part_execute (data->repo, data->header, data->part, FALSE, NULL,
-                                          cancellable, &error))
+  if (!_ostree_static_delta_part_execute (data->repo, data->from, data->header, data->part, FALSE,
+                                          NULL, cancellable, &error))
     g_task_return_error (task, error);
   else
     g_task_return_boolean (task, TRUE);
 }
 
 void
-_ostree_static_delta_part_execute_async (OstreeRepo *repo, GVariant *header, GVariant *part,
+_ostree_static_delta_part_execute_async (OstreeRepo *repo, const char *from, GVariant *header,
+                                         GVariant *part,
                                          GCancellable *cancellable, GAsyncReadyCallback callback,
                                          gpointer user_data)
 {
@@ -318,6 +322,7 @@ _ostree_static_delta_part_execute_async (OstreeRepo *repo, GVariant *header, GVa
 
   asyncdata = g_new0 (StaticDeltaPartExecuteAsyncData, 1);
   asyncdata->repo = g_object_ref (repo);
+  asyncdata->from = g_strdup (from);
   asyncdata->header = g_variant_ref (header);
   asyncdata->part = g_variant_ref (part);
   asyncdata->cancellable = cancellable ? g_object_ref (cancellable) : NULL;

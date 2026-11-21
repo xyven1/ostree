@@ -255,6 +255,15 @@ _ostree_hdiff_create_stream (const OtHdiffInput *old_in, const OtHdiffInput *new
   /* Our inputs serialize access themselves, so tell HDiffPatch to lock */
   const hdiff_TMTSets_s mtsets = { MAX (threads, 1), MAX (threads, 1), false, false };
 
+  /* TEMPORARY experiment: OSTREE_BENCH_HDIFF_MIN_WORK_BLOCK fixes the block differ's work split;
+   * the guard resets it on every way out
+   */
+  struct MinWorkGuard
+  {
+    MinWorkGuard (const char *v) { _ostree_hdiff_min_work = v ? (size_t)atoi (v) : 0; }
+    ~MinWorkGuard () { _ostree_hdiff_min_work = 0; }
+  } min_work_guard (g_getenv ("OSTREE_BENCH_HDIFF_MIN_WORK_BLOCK"));
+
   try
     {
       create_single_compressed_diff_stream (&new_stream, &old_stream, &out_stream, NULL,

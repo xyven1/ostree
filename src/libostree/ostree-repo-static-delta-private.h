@@ -199,12 +199,13 @@ typedef struct
   guint n_ops_executed[OSTREE_STATIC_DELTA_N_OPS];
 } OstreeDeltaExecuteStats;
 
-gboolean _ostree_static_delta_part_execute (OstreeRepo *repo, GVariant *header,
+/* @from: the delta's from-commit (NULL for a from-empty delta); bulk tree parts diff against it */
+gboolean _ostree_static_delta_part_execute (OstreeRepo *repo, const char *from, GVariant *header,
                                             GVariant *part_payload, gboolean stats_only,
                                             OstreeDeltaExecuteStats *stats,
                                             GCancellable *cancellable, GError **error);
 
-void _ostree_static_delta_part_execute_async (OstreeRepo *repo, GVariant *header,
+void _ostree_static_delta_part_execute_async (OstreeRepo *repo, const char *from, GVariant *header,
                                               GVariant *part_payload, GCancellable *cancellable,
                                               GAsyncReadyCallback callback, gpointer user_data);
 
@@ -239,7 +240,8 @@ gboolean _ostree_static_delta_bulk_generate (OstreeRepo *repo, const char *from,
                                                int parts_dfd, GPtrArray *out_parts,
                                                GCancellable *cancellable, GError **error);
 
-gboolean _ostree_static_delta_bulk_part_execute (OstreeRepo *repo, GVariant *objects,
+gboolean _ostree_static_delta_bulk_part_execute (OstreeRepo *repo, const char *from,
+                                                   GVariant *objects,
                                                    GVariant *part, gboolean stats_only,
                                                    GCancellable *cancellable, GError **error);
 
